@@ -1,0 +1,29 @@
+# Example storage.cfg stanza for Hitachi Block Storage Plugin
+#
+# Add this to /etc/pve/storage.cfg after installing the plugin.
+# Credentials are stored separately via: pvesm set <storeid> --username <user> --password <pass>
+
+hitachiblock: myarray
+    mgmt_ip 10.0.1.100
+    storage_id 836000123456
+    pool_id 0
+    snap_pool_id 1
+    target_ports CL1-A,CL2-A
+    host_mode LINUX/IRIX
+    platform vsp_one
+    shared 1
+    content images
+    nodes node1,node2,node3
+
+# VSP G series example (uses Ops Center API Config Manager)
+# hitachiblock: vspg-array
+#     mgmt_ip 10.0.1.200
+#     storage_id 410000123456
+#     pool_id 0
+#     snap_pool_id 1
+#     target_ports CL1-A,CL2-A,CL3-A,CL4-A
+#     host_mode LINUX/IRIX
+#     platform vsp_g
+#     mgmt_port 23451
+#     shared 1
+#     content images

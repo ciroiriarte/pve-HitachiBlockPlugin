@@ -23,3 +23,6 @@ This scope should include:
 - Seek modularity to simplify maintenance
 - Use symver varsioning convention
 - Keep documentation always in sync
+- Developer
+  * Name: Ciro Iriarte
+  * email: ciro.iriarte+software@gmail.com

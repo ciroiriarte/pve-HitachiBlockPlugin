@@ -1,0 +1,20 @@
+Source: pve-storage-hitachiblock
+Section: admin
+Priority: optional
+Maintainer: PVE Hitachi Plugin Developers <dev@example.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+
+Package: pve-storage-hitachiblock
+Architecture: all
+Depends: ${misc:Depends},
+         ${perl:Depends},
+         proxmox-ve (>= 8.0),
+         libwww-perl,
+         libjson-perl,
+         multipath-tools
+Description: Proxmox VE storage plugin for Hitachi block storage
+ Storage plugin for Proxmox VE that integrates with Hitachi FC-based
+ block storage systems (VSP G series and VSP One Block).
+ Provides 1 LUN per virtual disk with array-offloaded storage services
+ including snapshots, clones, and online resize.

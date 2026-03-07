@@ -1,0 +1,5 @@
+*.deb
+*.buildinfo
+*.changes
+debian/.debhelper/
+debian/pve-storage-hitachiblock/

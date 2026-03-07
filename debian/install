@@ -1,0 +1,4 @@
+usr/share/perl5/PVE/Storage/Custom/HitachiBlockPlugin.pm
+usr/share/perl5/PVE/Storage/HitachiBlock/RestClient.pm
+usr/share/perl5/PVE/Storage/HitachiBlock/Multipath.pm
+usr/share/perl5/PVE/Storage/HitachiBlock/Config.pm
