@@ -44,4 +44,32 @@ subtest 'ldev_to_wwid' => sub {
     like($@, qr/storage_serial is required/, 'requires serial');
 };
 
+subtest 'flush_device_requires_wwid' => sub {
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+
+    eval { $mp->flush_device() };
+    like($@, qr/wwid is required/, 'flush_device requires wwid');
+};
+
+subtest 'remove_device_requires_wwid' => sub {
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+
+    eval { $mp->remove_device() };
+    like($@, qr/wwid is required/, 'remove_device requires wwid');
+};
+
+subtest 'resize_device_requires_wwid' => sub {
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+
+    eval { $mp->resize_device() };
+    like($@, qr/wwid is required/, 'resize_device requires wwid');
+};
+
+subtest 'get_device_size_requires_path' => sub {
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+
+    eval { $mp->get_device_size() };
+    like($@, qr/path is required/, 'get_device_size requires path');
+};
+
 done_testing();

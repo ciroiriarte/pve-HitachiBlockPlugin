@@ -86,6 +86,18 @@ sub properties {
             type        => 'string',
             optional    => 1,
         },
+        qos_upper_iops => {
+            description => "Default upper IOPS limit per LDEV (0 = unlimited).",
+            type        => 'integer',
+            minimum     => 0,
+            optional    => 1,
+        },
+        qos_upper_mbps => {
+            description => "Default upper throughput limit per LDEV in MB/s (0 = unlimited).",
+            type        => 'integer',
+            minimum     => 0,
+            optional    => 1,
+        },
     };
 }
 
@@ -103,8 +115,10 @@ sub options {
         shared       => { optional => 1 },
         disable      => { optional => 1 },
         content      => { optional => 1 },
-        username     => { optional => 1 },
-        password     => { optional => 1 },
+        username       => { optional => 1 },
+        password       => { optional => 1 },
+        qos_upper_iops => { optional => 1 },
+        qos_upper_mbps => { optional => 1 },
     };
 }
 
@@ -229,10 +243,14 @@ sub alloc_image {
     # Set label for identification
     my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $name);
     eval { $client->set_ldev_label($ldev_id, $label) };
-    warn "Failed to set LDEV label: $@" if $@;
+    if ($@) {
+        # Cleanup: delete LDEV on label failure since it's unidentifiable
+        warn "Failed to set LDEV label, cleaning up LDEV $ldev_id: $@";
+        eval { $client->delete_ldev($ldev_id) };
+        die "Failed to set LDEV label for '$name'\n";
+    }
 
     # Register in local map
-    my $ldev_info = $client->get_ldev($ldev_id);
     my $wwid = $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
 
     $config->register_ldev($name, $ldev_id,
@@ -240,6 +258,17 @@ sub alloc_image {
         size_mb  => $size_mb,
         pool_id  => $scfg->{pool_id},
     );
+
+    # Apply QoS limits if configured
+    if ($scfg->{qos_upper_iops} || $scfg->{qos_upper_mbps}) {
+        eval {
+            my %qos;
+            $qos{upper_iops} = $scfg->{qos_upper_iops} if $scfg->{qos_upper_iops};
+            $qos{upper_mbps} = $scfg->{qos_upper_mbps} if $scfg->{qos_upper_mbps};
+            $client->set_ldev_qos($ldev_id, %qos);
+        };
+        warn "QoS application warning: $@" if $@;
+    }
 
     # Map LUN to local host groups on all target ports
     eval { $class->_map_lun_to_local($storeid, $scfg, $client, $ldev_id) };
@@ -727,25 +756,49 @@ sub volume_resize {
     my ($ldev_id, $meta) = $config->lookup_ldev($volname);
     die "Volume '$volname' not found\n" unless defined $ldev_id;
 
+    # Verify current size from array to avoid stale registry data
+    my $ldev_info = eval { $client->get_ldev($ldev_id) };
+    my $current_mb;
+    if ($ldev_info && $ldev_info->{byteFormatCapacity}) {
+        # Parse "1024.00 M" or "1.00 G" format
+        my $cap = $ldev_info->{byteFormatCapacity};
+        if ($cap =~ /^([\d.]+)\s*G/i) {
+            $current_mb = int($1 * 1024);
+        } elsif ($cap =~ /^([\d.]+)\s*T/i) {
+            $current_mb = int($1 * 1024 * 1024);
+        } elsif ($cap =~ /^([\d.]+)\s*M/i) {
+            $current_mb = int($1);
+        } else {
+            $current_mb = $meta->{size_mb} || 0;
+        }
+    } else {
+        $current_mb = $meta->{size_mb} || 0;
+    }
+
     # Size is in bytes from PVE, convert to MB
     my $new_size_mb = ceil($size / (1024 * 1024));
-    my $current_mb  = $meta->{size_mb} || 0;
-    my $additional   = $new_size_mb - $current_mb;
+    my $additional = $new_size_mb - $current_mb;
 
     die "Cannot shrink volume (requested ${new_size_mb}MB, current ${current_mb}MB)\n"
         if $additional <= 0;
 
+    # Flush host buffers before expand (safety for running VMs)
+    my $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+    if ($running) {
+        eval { $multipath->flush_device($wwid) };
+        warn "Pre-resize flush warning: $@" if $@;
+    }
+
     # Expand LDEV on array
     $client->expand_ldev($ldev_id, $additional);
 
-    # Update registry
+    # Update registry with verified current size
     $config->register_ldev($volname, $ldev_id,
         %$meta,
         size_mb => $new_size_mb,
     );
 
     # Resize multipath device on host
-    my $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
     eval { $multipath->resize_device($wwid) };
     warn "Host-side resize warning: $@" if $@;
 
@@ -754,11 +807,33 @@ sub volume_resize {
 
 # ── Internal Helpers ──
 
+sub check_connection {
+    my ($class, $storeid, $scfg) = @_;
+
+    eval {
+        my $client = $class->_get_client($storeid, $scfg);
+        $client->login();
+        $client->get_pool($scfg->{pool_id});
+        $client->logout();
+    };
+    if ($@) {
+        return 0;
+    }
+    return 1;
+}
+
 sub _client {
     my ($class, $storeid) = @_;
 
     my $client = $_clients{$storeid};
-    croak "Storage '$storeid' is not activated" unless $client;
+    die "Storage '$storeid' is not activated\n" unless $client;
+
+    # Verify session is alive; reconnect if needed
+    eval { $client->keepalive() };
+    if ($@) {
+        eval { $client->login() };
+        die "Storage '$storeid' session lost and reconnect failed: $@\n" if $@;
+    }
 
     return $client;
 }
@@ -937,6 +1012,81 @@ sub parse_volname {
     }
 
     die "unable to parse volume name '$volname'\n";
+}
+
+# ── Orphan Detection ──
+
+sub list_orphans {
+    my ($class, $storeid, $scfg) = @_;
+
+    my $client = $class->_client($storeid);
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    my $registry = $config->list_registered();
+    my $label_prefix = "pve:${storeid}:";
+
+    # Get all LDEVs from the pool that have our label prefix
+    my $ldevs = $client->list_ldevs(pool_id => $scfg->{pool_id});
+
+    my %registered_ldevs;
+    for my $entry (values %$registry) {
+        $registered_ldevs{$entry->{ldev_id}} = 1 if defined $entry->{ldev_id};
+    }
+
+    my @orphans_on_array;   # LDEVs on array not in registry
+    my @orphans_in_registry; # registry entries whose LDEV doesn't exist
+
+    # Find array-side orphans
+    for my $ldev (@$ldevs) {
+        my $label = $ldev->{label} || '';
+        next unless $label =~ /^\Q$label_prefix\E/;
+
+        my $ldev_id = $ldev->{ldevId};
+        next if defined $ldev_id && $registered_ldevs{$ldev_id};
+
+        push @orphans_on_array, {
+            ldev_id => $ldev_id,
+            label   => $label,
+        };
+    }
+
+    # Find registry-side orphans (LDEV no longer exists on array)
+    my %array_ldev_ids;
+    for my $ldev (@$ldevs) {
+        $array_ldev_ids{$ldev->{ldevId}} = 1 if defined $ldev->{ldevId};
+    }
+
+    for my $volname (keys %$registry) {
+        my $entry = $registry->{$volname};
+        my $ldev_id = $entry->{ldev_id};
+        next unless defined $ldev_id;
+
+        unless ($array_ldev_ids{$ldev_id}) {
+            push @orphans_in_registry, {
+                volname => $volname,
+                ldev_id => $ldev_id,
+            };
+        }
+    }
+
+    return {
+        array_orphans    => \@orphans_on_array,
+        registry_orphans => \@orphans_in_registry,
+    };
+}
+
+sub cleanup_registry_orphans {
+    my ($class, $storeid, $scfg) = @_;
+
+    my $orphans = $class->list_orphans($storeid, $scfg);
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+
+    my $cleaned = 0;
+    for my $orphan (@{$orphans->{registry_orphans}}) {
+        $config->unregister_ldev($orphan->{volname});
+        $cleaned++;
+    }
+
+    return $cleaned;
 }
 
 1;

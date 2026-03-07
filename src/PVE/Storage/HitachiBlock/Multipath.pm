@@ -210,6 +210,23 @@ sub resize_device {
     return 1;
 }
 
+sub flush_device {
+    my ($self, $wwid) = @_;
+
+    croak "wwid is required" unless $wwid;
+
+    my $dm_wwid = $wwid;
+    $dm_wwid = "3$wwid" unless $dm_wwid =~ /^3/;
+
+    my $path = "/dev/mapper/$dm_wwid";
+    if (-e $path) {
+        eval { _run_cmd('blockdev', '--flushbufs', $path) };
+        warn "blockdev flush warning: $@" if $@;
+    }
+
+    return 1;
+}
+
 # ── WWID Helpers ──
 
 sub ldev_to_wwid {

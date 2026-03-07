@@ -1,3 +1,13 @@
+pve-storage-hitachiblock (0.3.0-1) stable; urgency=medium
+
+  * QoS support (per-LDEV IOPS/throughput limits)
+  * Session auto-reconnect on expiry
+  * Orphan detection and registry cleanup
+  * Volume resize hardening (array size verification, buffer flush)
+  * Partial failure cleanup in alloc_image
+
+ -- PVE Hitachi Plugin Developers <dev@example.com>  Fri, 07 Mar 2026 00:00:00 +0000
+
 pve-storage-hitachiblock (0.2.0-1) stable; urgency=medium
 
   * Snapshot metadata tracking and S-VOL lifecycle management

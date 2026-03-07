@@ -163,6 +163,24 @@ subtest 'snapshot_operations_require_params' => sub {
     like($@, qr/snap_pool_id is required/, 'clone_snapshot needs snap_pool_id');
 };
 
+subtest 'qos_operations_require_params' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip    => '10.0.1.100',
+        storage_id => '123',
+        username   => 'admin',
+        password   => 'secret',
+    );
+
+    eval { $client->set_ldev_qos() };
+    like($@, qr/ldev_id is required/, 'set_ldev_qos needs ldev_id');
+
+    eval { $client->set_ldev_qos(42) };
+    like($@, qr/At least one QoS parameter/, 'set_ldev_qos needs at least one param');
+
+    eval { $client->get_ldev_qos() };
+    like($@, qr/ldev_id is required/, 'get_ldev_qos needs ldev_id');
+};
+
 subtest 'url_construction' => sub {
     my $client = PVE::Storage::HitachiBlock::RestClient->new(
         mgmt_ip    => '10.0.1.100',

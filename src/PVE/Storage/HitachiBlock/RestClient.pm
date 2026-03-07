@@ -411,6 +411,39 @@ sub clone_snapshot_to_ldev {
     return $self->_wait_for_job($res);
 }
 
+# ── QoS Operations ──
+
+sub set_ldev_qos {
+    my ($self, $ldev_id, %opts) = @_;
+
+    croak "ldev_id is required" unless defined $ldev_id;
+
+    my $body = {};
+    $body->{upperIops} = int($opts{upper_iops})           if defined $opts{upper_iops};
+    $body->{upperTransferRate} = int($opts{upper_mbps})   if defined $opts{upper_mbps};
+    $body->{lowerIops} = int($opts{lower_iops})           if defined $opts{lower_iops};
+    $body->{lowerTransferRate} = int($opts{lower_mbps})   if defined $opts{lower_mbps};
+
+    croak "At least one QoS parameter is required" unless keys %$body;
+
+    my $res = $self->_request('PATCH', $self->_url("/ldevs/$ldev_id"), $body);
+    return $self->_wait_for_job($res);
+}
+
+sub get_ldev_qos {
+    my ($self, $ldev_id) = @_;
+
+    croak "ldev_id is required" unless defined $ldev_id;
+
+    my $ldev = $self->get_ldev($ldev_id);
+    return {
+        upper_iops => $ldev->{upperIops},
+        upper_mbps => $ldev->{upperTransferRate},
+        lower_iops => $ldev->{lowerIops},
+        lower_mbps => $ldev->{lowerTransferRate},
+    };
+}
+
 # ── Internal HTTP / Job Helpers ──
 
 sub _url {

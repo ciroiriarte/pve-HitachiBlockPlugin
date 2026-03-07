@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0] - 2026-03-07
+
+### Added
+- QoS support: `qos_upper_iops` and `qos_upper_mbps` storage properties
+  - Automatically applied to new LDEVs during `alloc_image`
+  - RestClient: `set_ldev_qos` and `get_ldev_qos` methods
+- `check_connection` method for lightweight connectivity verification
+- Orphan detection: `list_orphans` and `cleanup_registry_orphans` methods
+  - Identifies LDEVs on array not in registry and vice versa
+- Multipath: `flush_device` for safe buffer flush before resize
+
+### Changed
+- `_client` now auto-reconnects on session expiry (keepalive + re-login)
+- `alloc_image` cleans up LDEV on label-set failure (partial failure recovery)
+- `volume_resize` verifies current size from array before expanding
+  - Parses `byteFormatCapacity` from LDEV info (M/G/T formats)
+  - Flushes device buffers before resize on running VMs
+
 ## [0.2.0] - 2026-03-07
 
 ### Added
