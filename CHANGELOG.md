@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.0] - 2026-03-07
+
+### Added
+- Replication CLI tool (`bin/hitachiblock-repl`)
+  - TrueCopy (synchronous replication) pair management
+  - Universal Replicator (asynchronous replication) pair management
+  - Global-Active Device (GAD) pair management with quorum disk support
+  - Remote storage system registration
+  - Commands: list, create-tc, create-ur, create-gad, status, split, resync, delete
+- RestClient: replication operations
+  - `create_remote_copy_pair`, `delete_remote_copy_pair`, `get_remote_copy_pair`
+  - `list_remote_copy_pairs`, `split_remote_copy_pair`, `resync_remote_copy_pair`
+  - `register_remote_storage`, `list_remote_storages`
+- Full mocked test suite (`t/unit/restclient_mock.t`)
+  - HTTP response mocking for all RestClient operations
+  - LDEV, pool, host-group, LUN, snapshot, QoS, and replication tests
+- Plugin logic unit tests (`t/unit/plugin.t`)
+  - Volume name parsing, generation, feature matrix validation
+- GitHub Actions CI/CD pipeline (`.github/workflows/ci.yml`)
+  - Perl syntax checking, unit tests, install target verification
+
 ## [0.3.0] - 2026-03-07
 
 ### Added

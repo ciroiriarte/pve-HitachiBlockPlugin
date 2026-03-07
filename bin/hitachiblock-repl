@@ -1,0 +1,303 @@
+#!/usr/bin/perl
+
+# hitachiblock-repl - Replication management CLI for Hitachi Block Storage
+#
+# Manages TrueCopy (sync), Universal Replicator (async), and
+# Global-Active Device (GAD) replication pairs.
+#
+# Usage:
+#   hitachiblock-repl <command> --storeid <id> [options]
+#
+# Commands:
+#   list          List all replication pairs
+#   create-tc     Create TrueCopy (sync replication) pair
+#   create-ur     Create Universal Replicator (async replication) pair
+#   create-gad    Create Global-Active Device pair
+#   status        Show pair status
+#   split         Split (suspend) a replication pair
+#   resync        Resync a split pair
+#   delete        Delete a replication pair
+#   remote-list   List registered remote storage systems
+#   remote-add    Register a remote storage system
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use Pod::Usage;
+
+use lib '/usr/share/perl5';
+
+use PVE::Storage::HitachiBlock::RestClient;
+use PVE::Storage::HitachiBlock::Config;
+
+my $command = shift @ARGV || '';
+
+my %opts;
+GetOptions(\%opts,
+    'storeid=s',
+    'remote-storage-id=s',
+    'remote-ip=s',
+    'pvol=i',
+    'svol=i',
+    'copy-group=s',
+    'pair-name=s',
+    'pair-id=s',
+    'copy-pace=i',
+    'journal-id=i',
+    'quorum-disk-id=i',
+    'consistency-group',
+    'json',
+    'help',
+) or pod2usage(2);
+
+pod2usage(1) if $opts{help};
+pod2usage("storeid is required") unless $opts{storeid};
+
+my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $opts{storeid});
+my ($username, $password) = $config->read_credentials();
+
+# Read storage config (simplified — in production, parse from /etc/pve/storage.cfg)
+# For CLI use, we read from the credential store and expect mgmt_ip etc. as env vars
+# or from a config helper.
+my $mgmt_ip    = $ENV{HITACHI_MGMT_IP}    || die "Set HITACHI_MGMT_IP environment variable\n";
+my $storage_id = $ENV{HITACHI_STORAGE_ID} || die "Set HITACHI_STORAGE_ID environment variable\n";
+my $port       = $ENV{HITACHI_MGMT_PORT}  || 443;
+
+my $client = PVE::Storage::HitachiBlock::RestClient->new(
+    mgmt_ip    => $mgmt_ip,
+    storage_id => $storage_id,
+    username   => $username,
+    password   => $password,
+    port       => $port,
+);
+
+$client->login();
+
+eval {
+    if ($command eq 'list') {
+        cmd_list();
+    } elsif ($command eq 'create-tc') {
+        cmd_create('TC');
+    } elsif ($command eq 'create-ur') {
+        cmd_create('UR');
+    } elsif ($command eq 'create-gad') {
+        cmd_create('GAD');
+    } elsif ($command eq 'status') {
+        cmd_status();
+    } elsif ($command eq 'split') {
+        cmd_split();
+    } elsif ($command eq 'resync') {
+        cmd_resync();
+    } elsif ($command eq 'delete') {
+        cmd_delete();
+    } elsif ($command eq 'remote-list') {
+        cmd_remote_list();
+    } elsif ($command eq 'remote-add') {
+        cmd_remote_add();
+    } else {
+        die "Unknown command: '$command'\nRun with --help for usage.\n";
+    }
+};
+
+my $err = $@;
+eval { $client->logout() };
+die $err if $err;
+
+exit 0;
+
+# ── Command Implementations ──
+
+sub cmd_list {
+    my $pairs = $client->list_remote_copy_pairs();
+
+    if ($opts{json}) {
+        require JSON;
+        print JSON::encode_json($pairs) . "\n";
+        return;
+    }
+
+    printf "%-12s %-20s %-6s %-8s %-8s %-10s\n",
+        'PAIR_ID', 'COPY_GROUP', 'TYPE', 'P-VOL', 'S-VOL', 'STATUS';
+    print "-" x 70 . "\n";
+
+    for my $pair (@$pairs) {
+        printf "%-12s %-20s %-6s %-8s %-8s %-10s\n",
+            $pair->{copyPairId} || '-',
+            $pair->{copyGroupName} || '-',
+            $pair->{replicationType} || '-',
+            $pair->{pvolLdevId} // '-',
+            $pair->{svolLdevId} // '-',
+            $pair->{pairStatus} || '-';
+    }
+}
+
+sub cmd_create {
+    my ($type) = @_;
+
+    die "--pvol is required\n"             unless defined $opts{pvol};
+    die "--svol is required\n"             unless defined $opts{svol};
+    die "--remote-storage-id is required\n" unless $opts{'remote-storage-id'};
+    die "--copy-group is required\n"       unless $opts{'copy-group'};
+
+    my %create_opts = (
+        replication_type   => $type,
+        pvol_ldev_id       => $opts{pvol},
+        svol_ldev_id       => $opts{svol},
+        remote_storage_id  => $opts{'remote-storage-id'},
+        copy_group_name    => $opts{'copy-group'},
+        copy_pace          => $opts{'copy-pace'} || 3,
+        consistency_group  => $opts{'consistency-group'} || 0,
+    );
+
+    $create_opts{copy_pair_name} = $opts{'pair-name'} if $opts{'pair-name'};
+    $create_opts{journal_id}     = $opts{'journal-id'} if defined $opts{'journal-id'};
+    $create_opts{quorum_disk_id} = $opts{'quorum-disk-id'} if defined $opts{'quorum-disk-id'};
+
+    my $result = $client->create_remote_copy_pair(%create_opts);
+    print "Created $type pair: " . ($result->{resourceId} || $result->{jobId} || 'OK') . "\n";
+}
+
+sub cmd_status {
+    die "--pair-id is required\n" unless $opts{'pair-id'};
+
+    my $pair = $client->get_remote_copy_pair($opts{'pair-id'});
+
+    if ($opts{json}) {
+        require JSON;
+        print JSON::encode_json($pair) . "\n";
+        return;
+    }
+
+    print "Pair ID:      " . ($pair->{copyPairId} || '-') . "\n";
+    print "Copy Group:   " . ($pair->{copyGroupName} || '-') . "\n";
+    print "Type:         " . ($pair->{replicationType} || '-') . "\n";
+    print "P-VOL LDEV:   " . ($pair->{pvolLdevId} // '-') . "\n";
+    print "S-VOL LDEV:   " . ($pair->{svolLdevId} // '-') . "\n";
+    print "Status:       " . ($pair->{pairStatus} || '-') . "\n";
+    print "Progress:     " . ($pair->{progressRate} // '-') . "%\n" if defined $pair->{progressRate};
+}
+
+sub cmd_split {
+    die "--pair-id is required\n" unless $opts{'pair-id'};
+
+    $client->split_remote_copy_pair($opts{'pair-id'});
+    print "Split pair: $opts{'pair-id'}\n";
+}
+
+sub cmd_resync {
+    die "--pair-id is required\n" unless $opts{'pair-id'};
+
+    $client->resync_remote_copy_pair($opts{'pair-id'});
+    print "Resynced pair: $opts{'pair-id'}\n";
+}
+
+sub cmd_delete {
+    die "--pair-id is required\n" unless $opts{'pair-id'};
+
+    $client->delete_remote_copy_pair($opts{'pair-id'});
+    print "Deleted pair: $opts{'pair-id'}\n";
+}
+
+sub cmd_remote_list {
+    my $remotes = $client->list_remote_storages();
+
+    if ($opts{json}) {
+        require JSON;
+        print JSON::encode_json($remotes) . "\n";
+        return;
+    }
+
+    printf "%-20s %-16s %-10s\n", 'REMOTE_ID', 'IP', 'PATH_GROUP';
+    print "-" x 50 . "\n";
+
+    for my $r (@$remotes) {
+        printf "%-20s %-16s %-10s\n",
+            $r->{remoteStorageDeviceId} || '-',
+            $r->{remoteIpAddress} || '-',
+            $r->{pathGroupId} // '-';
+    }
+}
+
+sub cmd_remote_add {
+    die "--remote-storage-id is required\n" unless $opts{'remote-storage-id'};
+    die "--remote-ip is required\n"         unless $opts{'remote-ip'};
+
+    $client->register_remote_storage(
+        remote_storage_id => $opts{'remote-storage-id'},
+        remote_ip         => $opts{'remote-ip'},
+    );
+    print "Registered remote storage: $opts{'remote-storage-id'}\n";
+}
+
+__END__
+
+=head1 NAME
+
+hitachiblock-repl - Hitachi Block Storage Replication CLI
+
+=head1 SYNOPSIS
+
+  hitachiblock-repl <command> --storeid <id> [options]
+
+  Commands:
+    list              List all replication pairs
+    create-tc         Create TrueCopy pair (synchronous)
+    create-ur         Create Universal Replicator pair (asynchronous)
+    create-gad        Create Global-Active Device pair
+    status            Show pair status
+    split             Split (suspend) a pair
+    resync            Resync a split pair
+    delete            Delete a pair
+    remote-list       List remote storage systems
+    remote-add        Register a remote storage system
+
+  Options:
+    --storeid         PVE storage ID (for credentials)
+    --pvol            Primary volume LDEV ID
+    --svol            Secondary volume LDEV ID
+    --remote-storage-id  Remote storage serial/device ID
+    --remote-ip       Remote storage management IP
+    --copy-group      Copy group name
+    --pair-name       Copy pair name
+    --pair-id         Pair ID (for status/split/resync/delete)
+    --copy-pace       Copy pace (1-15, default: 3)
+    --journal-id      Journal ID (for UR)
+    --quorum-disk-id  Quorum disk ID (for GAD)
+    --consistency-group  Enable consistency group
+    --json            Output in JSON format
+    --help            Show this help
+
+  Environment variables:
+    HITACHI_MGMT_IP       Management IP of Configuration Manager
+    HITACHI_STORAGE_ID    Storage system serial number
+    HITACHI_MGMT_PORT     API port (default: 443)
+
+=head1 EXAMPLES
+
+  # List all replication pairs
+  hitachiblock-repl list --storeid myarray
+
+  # Create TrueCopy pair
+  hitachiblock-repl create-tc --storeid myarray \
+    --pvol 100 --svol 200 \
+    --remote-storage-id 836000789012 \
+    --copy-group PVE_TC_GROUP
+
+  # Create GAD pair
+  hitachiblock-repl create-gad --storeid myarray \
+    --pvol 100 --svol 200 \
+    --remote-storage-id 836000789012 \
+    --copy-group PVE_GAD_GROUP \
+    --quorum-disk-id 0
+
+  # Check pair status
+  hitachiblock-repl status --storeid myarray --pair-id TC_PAIR_001
+
+  # Split pair for maintenance
+  hitachiblock-repl split --storeid myarray --pair-id TC_PAIR_001
+
+  # Resync after maintenance
+  hitachiblock-repl resync --storeid myarray --pair-id TC_PAIR_001
+
+=cut

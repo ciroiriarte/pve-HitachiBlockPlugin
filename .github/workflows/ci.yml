@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  lint:
+    name: Perl Syntax Check
+    runs-on: ubuntu-latest
+    container:
+      image: perl:5.38
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: cpanm --notest LWP::UserAgent JSON Test::More File::Temp
+
+      - name: Check syntax
+        run: |
+          perl -Isrc -c src/PVE/Storage/HitachiBlock/RestClient.pm
+          perl -Isrc -c src/PVE/Storage/HitachiBlock/Multipath.pm
+          perl -Isrc -c src/PVE/Storage/HitachiBlock/Config.pm
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    container:
+      image: perl:5.38
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: cpanm --notest LWP::UserAgent JSON Test::More File::Temp
+
+      - name: Run unit tests
+        run: prove -Isrc -r t/unit/
+
+  build:
+    name: Verify Install Target
+    runs-on: ubuntu-latest
+    needs: [lint, unit-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install to staging directory and verify
+        run: |
+          mkdir -p /tmp/test-install
+          make install DESTDIR=/tmp/test-install
+          test -f /tmp/test-install/usr/share/perl5/PVE/Storage/Custom/HitachiBlockPlugin.pm
+          test -f /tmp/test-install/usr/share/perl5/PVE/Storage/HitachiBlock/RestClient.pm
+          test -f /tmp/test-install/usr/share/perl5/PVE/Storage/HitachiBlock/Multipath.pm
+          test -f /tmp/test-install/usr/share/perl5/PVE/Storage/HitachiBlock/Config.pm

@@ -24,12 +24,16 @@ install:
 	install -d $(DESTDIR)$(PERL_VENDORLIB)/PVE/Storage/HitachiBlock
 	install -m 0644 $(MODULES) $(DESTDIR)$(PERL_VENDORLIB)/PVE/Storage/HitachiBlock/
 
+	# CLI tools
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 0755 bin/hitachiblock-repl $(DESTDIR)$(PREFIX)/bin/
+
 	# Documentation
 	install -d $(DESTDIR)/usr/share/doc/$(PACKAGE)
 	install -m 0644 $(CONF_FILES) $(DESTDIR)/usr/share/doc/$(PACKAGE)/
 
 test:
-	prove -r t/unit/
+	prove -Isrc -r t/unit/
 
 clean:
 	@echo "Nothing to clean"

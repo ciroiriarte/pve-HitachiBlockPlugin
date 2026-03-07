@@ -444,6 +444,125 @@ sub get_ldev_qos {
     };
 }
 
+# ── Replication Operations (TrueCopy / Universal Replicator / GAD) ──
+
+sub create_remote_copy_pair {
+    my ($self, %opts) = @_;
+
+    croak "copy_group_name is required" unless $opts{copy_group_name};
+    croak "pvol_ldev_id is required"    unless defined $opts{pvol_ldev_id};
+    croak "svol_ldev_id is required"    unless defined $opts{svol_ldev_id};
+    croak "remote_storage_id is required" unless $opts{remote_storage_id};
+    croak "copy_pace is required"       unless $opts{copy_pace};
+
+    my $body = {
+        copyGroupName        => $opts{copy_group_name},
+        copyPairName         => $opts{copy_pair_name} || "pair_$opts{pvol_ldev_id}_$opts{svol_ldev_id}",
+        replicationType      => $opts{replication_type} || 'TC',  # TC, UR, GAD
+        pvolLdevId           => int($opts{pvol_ldev_id}),
+        svolLdevId           => int($opts{svol_ldev_id}),
+        remoteStorageDeviceId => $opts{remote_storage_id},
+        copyPace             => int($opts{copy_pace}),
+        isConsistencyGroup   => $opts{consistency_group} ? JSON::true : JSON::false,
+    };
+
+    # GAD-specific options
+    if (($opts{replication_type} || '') eq 'GAD') {
+        $body->{quorumDiskId} = int($opts{quorum_disk_id}) if defined $opts{quorum_disk_id};
+    }
+
+    # UR-specific options
+    if (($opts{replication_type} || '') eq 'UR') {
+        $body->{journalId} = int($opts{journal_id}) if defined $opts{journal_id};
+    }
+
+    my $res = $self->_request('POST', $self->_url('/remote-mirror-copypairs'), $body);
+    return $self->_wait_for_job($res);
+}
+
+sub delete_remote_copy_pair {
+    my ($self, $pair_id) = @_;
+
+    croak "pair_id is required" unless defined $pair_id;
+
+    my $res = $self->_request('DELETE', $self->_url("/remote-mirror-copypairs/$pair_id"));
+    return $self->_wait_for_job($res);
+}
+
+sub get_remote_copy_pair {
+    my ($self, $pair_id) = @_;
+
+    croak "pair_id is required" unless defined $pair_id;
+
+    return $self->_request('GET', $self->_url("/remote-mirror-copypairs/$pair_id"));
+}
+
+sub list_remote_copy_pairs {
+    my ($self, %filter) = @_;
+
+    my @params;
+    push @params, "replicationType=$filter{replication_type}" if $filter{replication_type};
+
+    my $query = @params ? '?' . join('&', @params) : '';
+    my $data = $self->_request('GET', $self->_url("/remote-mirror-copypairs$query"));
+    return $data->{data} || [];
+}
+
+sub split_remote_copy_pair {
+    my ($self, $pair_id) = @_;
+
+    croak "pair_id is required" unless defined $pair_id;
+
+    my $body = {
+        parameters => {
+            operationType => 'split',
+        },
+    };
+
+    my $res = $self->_request('POST', $self->_url("/remote-mirror-copypairs/$pair_id/actions/split/invoke"), $body);
+    return $self->_wait_for_job($res);
+}
+
+sub resync_remote_copy_pair {
+    my ($self, $pair_id) = @_;
+
+    croak "pair_id is required" unless defined $pair_id;
+
+    my $body = {
+        parameters => {
+            operationType => 'resync',
+        },
+    };
+
+    my $res = $self->_request('POST', $self->_url("/remote-mirror-copypairs/$pair_id/actions/resync/invoke"), $body);
+    return $self->_wait_for_job($res);
+}
+
+# ── Remote Storage Registration ──
+
+sub register_remote_storage {
+    my ($self, %opts) = @_;
+
+    croak "remote_storage_id is required" unless $opts{remote_storage_id};
+    croak "remote_ip is required"         unless $opts{remote_ip};
+
+    my $body = {
+        remoteStorageDeviceId => $opts{remote_storage_id},
+        pathGroupId           => int($opts{path_group_id} || 0),
+        remoteIpAddress       => $opts{remote_ip},
+    };
+
+    my $res = $self->_request('POST', $self->_url('/remote-storages'), $body);
+    return $self->_wait_for_job($res);
+}
+
+sub list_remote_storages {
+    my ($self) = @_;
+
+    my $data = $self->_request('GET', $self->_url('/remote-storages'));
+    return $data->{data} || [];
+}
+
 # ── Internal HTTP / Job Helpers ──
 
 sub _url {
