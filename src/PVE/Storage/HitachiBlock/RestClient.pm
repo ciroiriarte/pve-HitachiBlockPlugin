@@ -352,6 +352,29 @@ sub list_snapshots {
     return $data->{data} || [];
 }
 
+sub get_snapshot {
+    my ($self, $snapshot_id) = @_;
+
+    croak "snapshot_id is required" unless defined $snapshot_id;
+
+    return $self->_request('GET', $self->_url("/snapshots/$snapshot_id"));
+}
+
+sub split_snapshot {
+    my ($self, $snapshot_id) = @_;
+
+    croak "snapshot_id is required" unless defined $snapshot_id;
+
+    my $body = {
+        parameters => {
+            operationType => 'split',
+        },
+    };
+
+    my $res = $self->_request('POST', $self->_url("/snapshots/$snapshot_id/actions/split/invoke"), $body);
+    return $self->_wait_for_job($res);
+}
+
 sub restore_snapshot {
     my ($self, $snapshot_id) = @_;
 

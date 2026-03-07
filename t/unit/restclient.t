@@ -146,6 +146,34 @@ subtest 'snapshot_operations_require_params' => sub {
 
     eval { $client->restore_snapshot() };
     like($@, qr/snapshot_id is required/, 'restore_snapshot needs id');
+
+    eval { $client->get_snapshot() };
+    like($@, qr/snapshot_id is required/, 'get_snapshot needs id');
+
+    eval { $client->split_snapshot() };
+    like($@, qr/snapshot_id is required/, 'split_snapshot needs id');
+
+    eval { $client->clone_snapshot_to_ldev() };
+    like($@, qr/pvol_ldev_id is required/, 'clone_snapshot needs pvol');
+
+    eval { $client->clone_snapshot_to_ldev(pvol_ldev_id => 1) };
+    like($@, qr/svol_ldev_id is required/, 'clone_snapshot needs svol');
+
+    eval { $client->clone_snapshot_to_ldev(pvol_ldev_id => 1, svol_ldev_id => 2) };
+    like($@, qr/snap_pool_id is required/, 'clone_snapshot needs snap_pool_id');
+};
+
+subtest 'url_construction' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip    => '10.0.1.100',
+        storage_id => '836000123456',
+        username   => 'admin',
+        password   => 'secret',
+        port       => 23451,
+    );
+
+    my $url = $client->_url('/ldevs/42');
+    like($url, qr{https://10\.0\.1\.100:23451/ConfigurationManager/v1/objects/storages/836000123456/ldevs/42}, 'URL constructed correctly');
 };
 
 done_testing();

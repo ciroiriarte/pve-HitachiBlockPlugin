@@ -120,4 +120,73 @@ subtest 'credential_operations' => sub {
     like($@, qr/not found/, 'deleted credentials');
 };
 
+# ── Snapshot Registry Operations ──
+
+subtest 'snapshot_registry' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+
+    no warnings 'redefine';
+    local *PVE::Storage::HitachiBlock::Config::_registry_file = sub {
+        return "$tmpdir/test_snap.json";
+    };
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => 'test');
+
+    # Register base volume first
+    $config->register_ldev('vm-100-disk-1', 42, wwid => 'abc123', size_mb => 1024);
+
+    # Register snapshot
+    $config->register_snapshot('vm-100-disk-1', 'snap1',
+        svol_ldev_id   => 100,
+        svol_wwid      => 'def456',
+        snapshot_id    => 'snap-pair-1',
+        snapshot_group => 'pve_test_snap1',
+        pvol_ldev_id   => 42,
+    );
+
+    # Lookup snapshot
+    my $snap_meta = $config->lookup_snapshot('vm-100-disk-1', 'snap1');
+    ok($snap_meta, 'snapshot found');
+    is($snap_meta->{svol_ldev_id}, 100, 'svol_ldev_id correct');
+    is($snap_meta->{svol_wwid}, 'def456', 'svol_wwid correct');
+    is($snap_meta->{snapshot_id}, 'snap-pair-1', 'snapshot_id correct');
+    ok($snap_meta->{timestamp}, 'timestamp set');
+
+    # List snapshots
+    my $snaps = $config->list_snapshots('vm-100-disk-1');
+    ok(exists $snaps->{snap1}, 'snap1 in list');
+
+    # Register second snapshot
+    $config->register_snapshot('vm-100-disk-1', 'snap2',
+        svol_ldev_id   => 101,
+        svol_wwid      => 'ghi789',
+        snapshot_id    => 'snap-pair-2',
+        pvol_ldev_id   => 42,
+    );
+
+    $snaps = $config->list_snapshots('vm-100-disk-1');
+    is(scalar keys %$snaps, 2, 'two snapshots');
+
+    # Unregister first snapshot
+    $config->unregister_snapshot('vm-100-disk-1', 'snap1');
+    my $gone = $config->lookup_snapshot('vm-100-disk-1', 'snap1');
+    is($gone, undef, 'snap1 unregistered');
+
+    my $still_there = $config->lookup_snapshot('vm-100-disk-1', 'snap2');
+    ok($still_there, 'snap2 still exists');
+
+    # Unregister second snapshot — snapshots hash should be cleaned up
+    $config->unregister_snapshot('vm-100-disk-1', 'snap2');
+    $snaps = $config->list_snapshots('vm-100-disk-1');
+    is_deeply($snaps, {}, 'no snapshots remain');
+
+    # Lookup on nonexistent volume
+    my $nope = $config->lookup_snapshot('vm-999-disk-1', 'snap1');
+    is($nope, undef, 'nonexistent volume returns undef');
+
+    # Error: register snapshot on nonexistent volume
+    eval { $config->register_snapshot('vm-999-disk-1', 'snap1', svol_ldev_id => 200) };
+    like($@, qr/not in registry/, 'cannot snapshot nonexistent volume');
+};
+
 done_testing();

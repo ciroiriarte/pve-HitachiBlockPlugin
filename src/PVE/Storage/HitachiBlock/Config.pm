@@ -152,6 +152,65 @@ sub list_registered {
     return $self->load_registry();
 }
 
+# ── Snapshot Registry ──
+# Stores snapshot metadata per volume: volname -> { snapname -> { svol_ldev_id, timestamp, ... } }
+
+sub register_snapshot {
+    my ($self, $volname, $snapname, %meta) = @_;
+
+    croak "volname is required"  unless $volname;
+    croak "snapname is required" unless $snapname;
+
+    my $registry = $self->load_registry();
+    croak "Volume '$volname' not in registry" unless $registry->{$volname};
+
+    $registry->{$volname}{snapshots} //= {};
+    $registry->{$volname}{snapshots}{$snapname} = {
+        timestamp => time(),
+        %meta,
+    };
+    $self->save_registry($registry);
+
+    return 1;
+}
+
+sub unregister_snapshot {
+    my ($self, $volname, $snapname) = @_;
+
+    croak "volname is required"  unless $volname;
+    croak "snapname is required" unless $snapname;
+
+    my $registry = $self->load_registry();
+    if ($registry->{$volname} && $registry->{$volname}{snapshots}) {
+        delete $registry->{$volname}{snapshots}{$snapname};
+        # Clean up empty snapshots hash
+        delete $registry->{$volname}{snapshots}
+            unless %{$registry->{$volname}{snapshots}};
+    }
+    $self->save_registry($registry);
+
+    return 1;
+}
+
+sub lookup_snapshot {
+    my ($self, $volname, $snapname) = @_;
+
+    my $registry = $self->load_registry();
+    my $entry = $registry->{$volname} or return undef;
+    my $snaps = $entry->{snapshots}   or return undef;
+
+    return $snaps->{$snapname};
+}
+
+sub list_snapshots {
+    my ($self, $volname) = @_;
+
+    my $registry = $self->load_registry();
+    my $entry = $registry->{$volname} or return {};
+
+    return $entry->{snapshots} || {};
+}
+
 # ── Platform Defaults ──
 
 sub platform_defaults {

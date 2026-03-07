@@ -1,3 +1,13 @@
+pve-storage-hitachiblock (0.2.0-1) stable; urgency=medium
+
+  * Snapshot metadata tracking and S-VOL lifecycle management
+  * Snapshot-aware volume activation, path resolution, and cloning
+  * volume_snapshot_info for PVE UI snapshot tree display
+  * Parent tracking for linked clones
+  * RestClient: get_snapshot, split_snapshot methods
+
+ -- PVE Hitachi Plugin Developers <dev@example.com>  Fri, 07 Mar 2026 00:00:00 +0000
+
 pve-storage-hitachiblock (0.1.0-1) stable; urgency=medium
 
   * Initial release
