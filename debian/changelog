@@ -11,7 +11,7 @@ pve-storage-hitachiblock (1.1.0-1) stable; urgency=medium
   * Host group auto-delete on storage deactivation (group_delete)
   * Multi-attach support (concurrent LUN mappings to multiple nodes)
 
- -- PVE Hitachi Plugin Developers <dev@example.com>  Fri, 07 Mar 2026 00:00:00 +0000
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Fri, 07 Mar 2026 00:00:00 +0000
 
 pve-storage-hitachiblock (1.0.0-1) stable; urgency=medium
 
@@ -22,7 +22,7 @@ pve-storage-hitachiblock (1.0.0-1) stable; urgency=medium
   * Plugin logic unit tests
   * GitHub Actions CI/CD pipeline
 
- -- PVE Hitachi Plugin Developers <dev@example.com>  Fri, 07 Mar 2026 00:00:00 +0000
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Fri, 07 Mar 2026 00:00:00 +0000
 
 pve-storage-hitachiblock (0.3.0-1) stable; urgency=medium
 
@@ -32,7 +32,7 @@ pve-storage-hitachiblock (0.3.0-1) stable; urgency=medium
   * Volume resize hardening (array size verification, buffer flush)
   * Partial failure cleanup in alloc_image
 
- -- PVE Hitachi Plugin Developers <dev@example.com>  Fri, 07 Mar 2026 00:00:00 +0000
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Fri, 07 Mar 2026 00:00:00 +0000
 
 pve-storage-hitachiblock (0.2.0-1) stable; urgency=medium
 
@@ -42,7 +42,7 @@ pve-storage-hitachiblock (0.2.0-1) stable; urgency=medium
   * Parent tracking for linked clones
   * RestClient: get_snapshot, split_snapshot methods
 
- -- PVE Hitachi Plugin Developers <dev@example.com>  Fri, 07 Mar 2026 00:00:00 +0000
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Fri, 07 Mar 2026 00:00:00 +0000
 
 pve-storage-hitachiblock (0.1.0-1) stable; urgency=medium
 
@@ -52,4 +52,4 @@ pve-storage-hitachiblock (0.1.0-1) stable; urgency=medium
   * Linux FC multipath management
   * Snapshot, clone, and resize support
 
- -- PVE Hitachi Plugin Developers <dev@example.com>  Fri, 07 Mar 2026 00:00:00 +0000
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Fri, 07 Mar 2026 00:00:00 +0000

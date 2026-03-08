@@ -1,7 +1,7 @@
 Source: pve-storage-hitachiblock
 Section: admin
 Priority: optional
-Maintainer: PVE Hitachi Plugin Developers <dev@example.com>
+Maintainer: Ciro Iriarte <ciro.iriarte+software@gmail.com>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.2
 
