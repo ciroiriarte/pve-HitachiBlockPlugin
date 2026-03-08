@@ -7,11 +7,18 @@ Provides **1 LUN per virtual disk** with storage services offloaded to the array
 ## Features
 
 - **Thin provisioning** via Hitachi DP pools
-- **Snapshots** using Thin Image (array-offloaded)
+- **Snapshots** using Thin Image (array-offloaded, per-LDEV)
 - **Linked and full clones** via Thin Image / ShadowImage
-- **Online volume resize** with host-side multipath resize
+- **Clone from snapshot** support
+- **Online volume resize** with array-side verification and host-side multipath resize
+- **QoS** per-LDEV IOPS and throughput limits
 - **Active-node-only LUN mapping** for scalability
 - **Capacity monitoring** reported to PVE UI
+- **Session auto-reconnect** on expiry
+- **Orphan detection** and registry cleanup
+- **Partial failure recovery** during volume allocation
+- **Replication CLI tool** for TrueCopy, Universal Replicator, and Global-Active Device (GAD)
+- **Snapshot metadata tracking** in cluster-replicated registry
 
 ## Supported Platforms
 
@@ -22,20 +29,19 @@ Provides **1 LUN per virtual disk** with storage services offloaded to the array
 
 Both platforms use the same Configuration Manager REST API endpoints.
 
-## Installation
+## Quick Start
 
 ```bash
-# From source
+# Install
 make install
+systemctl restart pvedaemon
 
-# Or build and install Debian package
+# Or build Debian package
 make deb
-dpkg -i ../pve-storage-hitachiblock_0.1.0-1_all.deb
+dpkg -i ../pve-storage-hitachiblock_1.0.0-1_all.deb
 ```
 
-## Configuration
-
-Add to `/etc/pve/storage.cfg`:
+Configure in `/etc/pve/storage.cfg`:
 
 ```
 hitachiblock: myarray
@@ -59,10 +65,17 @@ pvesm set myarray --username admin --password secret
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Installation](docs/installation.md)
-- [Configuration](docs/configuration.md)
-- [Operations](docs/operations.md)
+- [Architecture](docs/architecture.md) - Component design and data flows
+- [Installation](docs/installation.md) - Host and array prerequisites, install steps
+- [Configuration](docs/configuration.md) - Plugin parameters, credentials, platform differences
+- [Operations](docs/operations.md) - Storage services, replication CLI, troubleshooting
+- [Storage Appliance Prerequisites](docs/prerequisites.md) - What must be configured on the Hitachi array
+
+## Testing
+
+```bash
+make test   # Run unit tests
+```
 
 ## License
 
