@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.1.0] - 2026-03-07
+
+### Added
+- Manage/unmanage volumes: `manage_volume` imports existing array LDEVs into PVE,
+  `unmanage_volume` releases a volume without deleting the LDEV
+- Zero page reclamation: `discard_zero_page` property triggers array-side zero page
+  discard on volume deactivation for thin pool space recovery
+- QoS lower bounds and I/O priority: `qos_lower_iops`, `qos_lower_mbps` minimum
+  guarantees and `qos_priority` (1=high, 2=medium, 3=low) response priority
+- LDEV range restriction: `ldev_range` property limits LDEV ID allocation to a
+  specific range (decimal or hex), preventing collisions in shared arrays
+- Storage-assisted volume migration: `volume_migrate_pool` moves an LDEV between
+  DP pools using array-side copy (no host I/O required)
+- Consistency group snapshots: `volume_snapshot_consistency_group` creates atomic
+  snapshots across multiple volumes using Hitachi consistency groups
+- Port scheduler: `port_scheduler` property enables round-robin target port selection
+  for LUN mappings, distributing I/O across FC ports (minimum 2 ports per volume)
+- Copy speed control: `copy_speed` property (1-15) throttles array-side copy
+  operations during snapshots and clones
+- Host group auto-delete: `group_delete` property removes empty host groups on
+  storage deactivation
+- Multi-attach: activate/deactivate correctly handle concurrent LUN mappings to
+  multiple nodes (each node maps/unmaps independently)
+- RestClient: `reclaim_zero_pages`, `migrate_ldev`, `delete_host_group` methods
+- RestClient: `responsePriority` support in `set_ldev_qos`
+- RestClient: `copySpeed` support in `create_snapshot` and `clone_snapshot_to_ldev`
+- RestClient: `isConsistencyGroup` flag now configurable in `create_snapshot`
+- `volume_has_feature` now reports `resize` capability
+- Config: `ldev_range` validation in `validate_config`
+- Tests for all new RestClient methods and plugin logic
+
 ## [1.0.0] - 2026-03-07
 
 ### Added

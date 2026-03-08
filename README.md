@@ -38,7 +38,7 @@ systemctl restart pvedaemon
 
 # Or build Debian package
 make deb
-dpkg -i ../pve-storage-hitachiblock_1.0.0-1_all.deb
+dpkg -i ../pve-storage-hitachiblock_1.1.0-1_all.deb
 ```
 
 Configure in `/etc/pve/storage.cfg`:

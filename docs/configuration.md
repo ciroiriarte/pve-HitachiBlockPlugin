@@ -34,6 +34,14 @@ hitachiblock: myarray
     nodes pve1,pve2,pve3
     qos_upper_iops 5000
     qos_upper_mbps 200
+    qos_lower_iops 500
+    qos_lower_mbps 50
+    qos_priority 2
+    ldev_range 1000-1999
+    discard_zero_page 1
+    port_scheduler 1
+    copy_speed 5
+    group_delete 1
 ```
 
 ## Parameters
@@ -57,6 +65,14 @@ hitachiblock: myarray
 | `mgmt_port` | Auto-detected | API port override. Auto: 443 for `vsp_one`, 23451 for `vsp_g`. |
 | `qos_upper_iops` | None | Maximum IOPS limit applied to every new LDEV |
 | `qos_upper_mbps` | None | Maximum throughput (MB/s) limit applied to every new LDEV |
+| `qos_lower_iops` | None | Minimum guaranteed IOPS per LDEV (lower bound, min 0) |
+| `qos_lower_mbps` | None | Minimum guaranteed throughput (MB/s) per LDEV (lower bound, min 0) |
+| `qos_priority` | None | QoS priority level: `1` = high, `2` = medium, `3` = low |
+| `ldev_range` | None | Restrict LDEV allocation to a numeric range (e.g., `1000-1999` or `0x3E8-0x7CF`) |
+| `discard_zero_page` | `0` | When enabled (`1`), reclaims zero pages on `deactivate_volume` |
+| `port_scheduler` | `0` | When enabled (`1`), uses round-robin port selection for LUN mapping |
+| `copy_speed` | None | Array-side copy speed for clone/migration operations (integer, 1-15) |
+| `group_delete` | `0` | When enabled (`1`), automatically deletes empty host groups on deactivate |
 
 ### Standard PVE Parameters
 
@@ -98,10 +114,18 @@ The plugin uses a single code path for both platforms. The only difference is th
 
 QoS limits are applied automatically to every new LDEV created by the plugin. Set at the storage level:
 
+**Upper bounds (caps)**:
 - `qos_upper_iops` - Maximum IOPS limit per LDEV
 - `qos_upper_mbps` - Maximum throughput (MB/s) limit per LDEV
 
-Both can be set simultaneously. QoS is applied during `alloc_image` after LDEV creation. Existing LDEVs are not retroactively modified.
+**Lower bounds (guarantees)**:
+- `qos_lower_iops` - Minimum guaranteed IOPS per LDEV
+- `qos_lower_mbps` - Minimum guaranteed throughput (MB/s) per LDEV
+
+**Priority**:
+- `qos_priority` - Scheduling priority when the array is under contention: `1` = high, `2` = medium, `3` = low
+
+Upper bounds, lower bounds, and priority can all be combined. QoS is applied during `alloc_image` after LDEV creation. Existing LDEVs are not retroactively modified.
 
 To change QoS for existing volumes, use the Hitachi Configuration Manager UI or API directly.
 
@@ -114,7 +138,7 @@ The plugin **automatically manages host groups** on the configured target ports:
 3. If none found, it creates a new host group named `PVE-<hostname>` and registers the WWNs
 4. LUNs are mapped to the host group of the node running the VM
 
-Host groups are not deleted when the storage is deactivated; they persist for reuse.
+By default, host groups are not deleted when the storage is deactivated; they persist for reuse. If the `group_delete` option is enabled, the plugin automatically deletes host groups that become empty (no remaining LUN mappings) during `deactivate_volume`.
 
 ## Session Management
 

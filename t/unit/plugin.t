@@ -94,6 +94,7 @@ subtest 'volume_has_feature_logic' => sub {
         copy       => { current => 1, snap => 1 },
         sparseinit => { current => 1 },
         template   => { current => 1 },
+        resize     => { current => 1 },
     );
 
     my $check = sub {
@@ -114,9 +115,12 @@ subtest 'volume_has_feature_logic' => sub {
     is($check->('clone', 'snap1'), 1, 'clone from snapshot');
     is($check->('copy', 'snap1'), 1, 'copy from snapshot');
 
+    # Resize feature
+    is($check->('resize', undef), 1, 'resize on current');
+    is($check->('resize', 'snap1'), 0, 'no resize of snapshot');
+
     # Unknown feature
     is($check->('unknown', undef), 0, 'unknown feature');
-    is($check->('resize', undef), 0, 'resize not in feature list');
 };
 
 # ── Label Format ──
@@ -133,6 +137,77 @@ subtest 'label_constraints' => sub {
     } else {
         pass("long label fits");
     }
+};
+
+# ── LDEV Range Parsing ──
+
+subtest 'ldev_range_parsing' => sub {
+    # Decimal range
+    my $range = '1000-1999';
+    if ($range =~ /^(\d+)-(\d+)$/) {
+        is($1, 1000, 'decimal min');
+        is($2, 1999, 'decimal max');
+    } else {
+        fail('should match decimal');
+    }
+
+    # Hex range
+    $range = '0x3E8-0x7CF';
+    if ($range =~ /^(0x[0-9a-f]+)-(0x[0-9a-f]+)$/i) {
+        is(hex($1), 1000, 'hex min');
+        is(hex($2), 1999, 'hex max');
+    } else {
+        fail('should match hex');
+    }
+
+    # Invalid range
+    $range = 'invalid';
+    ok($range !~ /^(0x[0-9a-fA-F]+|\d+)-(0x[0-9a-fA-F]+|\d+)$/, 'invalid range rejected');
+};
+
+# ── Port Scheduler Logic ──
+
+subtest 'port_scheduler_round_robin' => sub {
+    my @all_ports = ('CL1-A', 'CL2-A', 'CL3-A', 'CL4-A');
+    my %counters;
+
+    my $select = sub {
+        my ($storeid) = @_;
+        my $idx = ($counters{$storeid} || 0) % scalar(@all_ports);
+        my $next_idx = ($idx + 1) % scalar(@all_ports);
+        my @selected = ($all_ports[$idx], $all_ports[$next_idx]);
+        $counters{$storeid} = $next_idx + 1;
+        return @selected;
+    };
+
+    my @p1 = $select->('test');
+    is_deeply(\@p1, ['CL1-A', 'CL2-A'], 'first selection: ports 0,1');
+
+    my @p2 = $select->('test');
+    is_deeply(\@p2, ['CL3-A', 'CL4-A'], 'second selection: ports 2,3');
+
+    my @p3 = $select->('test');
+    is_deeply(\@p3, ['CL1-A', 'CL2-A'], 'wraps around: ports 0,1 again');
+};
+
+# ── Manage/Unmanage Volume Name Logic ──
+
+subtest 'manage_generates_volname' => sub {
+    # When managing an existing LDEV, a new volname is generated
+    my %registry = (
+        'vm-100-disk-1' => { ldev_id => 1 },
+        'vm-100-disk-2' => { ldev_id => 2 },
+    );
+
+    my $vmid = 100;
+    my $max_seq = 0;
+    for my $name (keys %registry) {
+        if ($name =~ /^vm-${vmid}-disk-(\d+)$/) {
+            $max_seq = $1 if $1 > $max_seq;
+        }
+    }
+    is("vm-${vmid}-disk-" . ($max_seq + 1), 'vm-100-disk-3',
+       'managed LDEV gets next available volname');
 };
 
 done_testing();

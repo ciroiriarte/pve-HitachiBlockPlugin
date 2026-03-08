@@ -322,11 +322,12 @@ sub create_snapshot {
         snapshotGroupName  => $opts{snapshot_group} || 'pve_snap',
         snapshotPoolId     => int($opts{snap_pool_id}),
         pvolLdevId         => int($opts{pvol_ldev_id}),
-        isConsistencyGroup => JSON::false,
+        isConsistencyGroup => $opts{is_consistency_group} ? JSON::true : JSON::false,
         autoSplit          => JSON::true,
     };
 
     $body->{svolLdevId} = int($opts{svol_ldev_id}) if defined $opts{svol_ldev_id};
+    $body->{copySpeed}  = int($opts{copy_speed})   if defined $opts{copy_speed};
 
     my $res = $self->_request('POST', $self->_url('/snapshots'), $body);
     return $self->_wait_for_job($res);
@@ -407,6 +408,8 @@ sub clone_snapshot_to_ldev {
         autoSplit          => JSON::true,
     };
 
+    $body->{copySpeed} = int($opts{copy_speed}) if defined $opts{copy_speed};
+
     my $res = $self->_request('POST', $self->_url('/snapshots'), $body);
     return $self->_wait_for_job($res);
 }
@@ -419,10 +422,11 @@ sub set_ldev_qos {
     croak "ldev_id is required" unless defined $ldev_id;
 
     my $body = {};
-    $body->{upperIops} = int($opts{upper_iops})           if defined $opts{upper_iops};
-    $body->{upperTransferRate} = int($opts{upper_mbps})   if defined $opts{upper_mbps};
-    $body->{lowerIops} = int($opts{lower_iops})           if defined $opts{lower_iops};
-    $body->{lowerTransferRate} = int($opts{lower_mbps})   if defined $opts{lower_mbps};
+    $body->{upperIops} = int($opts{upper_iops})                   if defined $opts{upper_iops};
+    $body->{upperTransferRate} = int($opts{upper_mbps})           if defined $opts{upper_mbps};
+    $body->{lowerIops} = int($opts{lower_iops})                   if defined $opts{lower_iops};
+    $body->{lowerTransferRate} = int($opts{lower_mbps})           if defined $opts{lower_mbps};
+    $body->{responsePriority} = int($opts{response_priority})     if defined $opts{response_priority};
 
     croak "At least one QoS parameter is required" unless keys %$body;
 
@@ -437,10 +441,11 @@ sub get_ldev_qos {
 
     my $ldev = $self->get_ldev($ldev_id);
     return {
-        upper_iops => $ldev->{upperIops},
-        upper_mbps => $ldev->{upperTransferRate},
-        lower_iops => $ldev->{lowerIops},
-        lower_mbps => $ldev->{lowerTransferRate},
+        upper_iops        => $ldev->{upperIops},
+        upper_mbps        => $ldev->{upperTransferRate},
+        lower_iops        => $ldev->{lowerIops},
+        lower_mbps        => $ldev->{lowerTransferRate},
+        response_priority => $ldev->{responsePriority},
     };
 }
 
@@ -561,6 +566,47 @@ sub list_remote_storages {
 
     my $data = $self->_request('GET', $self->_url('/remote-storages'));
     return $data->{data} || [];
+}
+
+# ── Zero Page Reclamation ──
+
+sub reclaim_zero_pages {
+    my ($self, $ldev_id) = @_;
+
+    croak "ldev_id is required" unless defined $ldev_id;
+
+    my $body = { parameters => {} };
+    my $res = $self->_request('POST', $self->_url("/ldevs/$ldev_id/actions/discard-zero-page/invoke"), $body);
+    return $self->_wait_for_job($res);
+}
+
+# ── Storage-Assisted LDEV Migration ──
+
+sub migrate_ldev {
+    my ($self, $ldev_id, $target_pool_id) = @_;
+
+    croak "ldev_id is required"        unless defined $ldev_id;
+    croak "target_pool_id is required" unless defined $target_pool_id;
+
+    my $body = {
+        parameters => {
+            poolId => int($target_pool_id),
+        },
+    };
+
+    my $res = $self->_request('POST', $self->_url("/ldevs/$ldev_id/actions/change-pool/invoke"), $body);
+    return $self->_wait_for_job($res);
+}
+
+# ── Host Group Deletion ──
+
+sub delete_host_group {
+    my ($self, $host_group_id) = @_;
+
+    croak "host_group_id is required" unless defined $host_group_id;
+
+    my $res = $self->_request('DELETE', $self->_url("/host-groups/$host_group_id"));
+    return $self->_wait_for_job($res);
 }
 
 # ── Internal HTTP / Job Helpers ──

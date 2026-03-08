@@ -5,6 +5,7 @@ use warnings;
 
 use JSON qw(encode_json decode_json);
 use File::Path qw(make_path);
+use File::Basename qw(dirname);
 use Fcntl qw(:flock);
 use Carp qw(croak);
 
@@ -35,9 +36,9 @@ sub store_credentials {
     croak "username is required" unless $username;
     croak "password is required" unless $password;
 
-    make_path($CREDS_DIR) unless -d $CREDS_DIR;
-
     my $file = $self->_creds_file();
+    my $dir = dirname($file);
+    make_path($dir) unless -d $dir;
     open(my $fh, '>', $file) or croak "Cannot write credentials to $file: $!";
     chmod(0600, $file);
     print $fh encode_json({ username => $username, password => $password });
@@ -97,9 +98,10 @@ sub save_registry {
 
     croak "registry must be a hashref" unless ref $registry eq 'HASH';
 
-    make_path($REGISTRY_DIR) unless -d $REGISTRY_DIR;
-
     my $file = $self->_registry_file();
+    my $dir = dirname($file);
+    make_path($dir) unless -d $dir;
+
     open(my $fh, '>', $file) or croak "Cannot write registry $file: $!";
     flock($fh, LOCK_EX);
     print $fh encode_json($registry);
@@ -242,6 +244,13 @@ sub validate_config {
 
     if ($config->{platform} && !exists $PLATFORM_DEFAULTS{$config->{platform}}) {
         push @errors, "platform must be one of: " . join(', ', sort keys %PLATFORM_DEFAULTS);
+    }
+
+    if ($config->{ldev_range}) {
+        my $r = $config->{ldev_range};
+        unless ($r =~ /^(0x[0-9a-fA-F]+|\d+)-(0x[0-9a-fA-F]+|\d+)$/) {
+            push @errors, "ldev_range must be 'min-max' (decimal or 0x hex), got '$r'";
+        }
     }
 
     croak "Configuration errors: " . join('; ', @errors) if @errors;

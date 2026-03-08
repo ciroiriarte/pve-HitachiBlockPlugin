@@ -95,6 +95,7 @@ The plugin implements `volume_snapshot_info` to provide snapshot tree informatio
 - Creates a temporary snapshot, copies data to a new independent LDEV, then deletes the temporary snapshot
 - Slower but produces a fully independent volume
 - No dependency on the source volume after creation
+- The `copy_speed` parameter (1-15) controls the array-side copy rate; higher values complete faster but consume more array resources
 
 ### Clone from Snapshot
 
@@ -130,9 +131,11 @@ The plugin:
 
 Per-LDEV IOPS and throughput limits:
 
-- Configured at the storage level via `qos_upper_iops` and `qos_upper_mbps`
-- Automatically applied to every new LDEV during `alloc_image`
-- Both limits can be set simultaneously
+- **Upper bounds**: `qos_upper_iops` and `qos_upper_mbps` cap the maximum IOPS and throughput per LDEV
+- **Lower bounds**: `qos_lower_iops` and `qos_lower_mbps` guarantee a minimum level of IOPS and throughput per LDEV, ensuring performance even under contention
+- **Priority**: `qos_priority` sets the scheduling priority (`1` = high, `2` = medium, `3` = low) used by the array to arbitrate I/O when resources are contested
+- All QoS parameters are automatically applied to every new LDEV during `alloc_image`
+- Upper bounds, lower bounds, and priority can be combined as needed
 - Existing volumes are not retroactively modified
 
 To manage QoS on existing volumes, use the Hitachi Configuration Manager UI or the REST API directly.
@@ -154,6 +157,82 @@ Detects:
 Removes registry entries that reference non-existent array LDEVs. This is useful after manual array-side operations or recovery from failures.
 
 **Note**: Array orphans (LDEVs without registry entries) are not automatically deleted to prevent data loss. They should be reviewed and handled manually.
+
+---
+
+## Manage / Unmanage Volumes
+
+### Manage (Import Existing LDEV)
+
+`manage_volume(storeid, scfg, ldev_id, vmid)` imports an existing LDEV into the plugin's registry without creating a new one. This is useful for adopting LDEVs that were pre-created on the array or that were previously unmanaged.
+
+The plugin:
+
+1. Reads the LDEV metadata (size, WWID) from the array
+2. Assigns a PVE volume name (`vm-<VMID>-disk-<N>`) and sets the LDEV label
+3. Registers the volume in the LDEV registry
+4. Maps the LUN to the local node's host group
+
+### Unmanage (Release Without Deletion)
+
+`unmanage_volume(storeid, scfg, volname)` releases a volume from the plugin's management without deleting the LDEV on the array. The LDEV remains intact for potential re-import or external use.
+
+The plugin:
+
+1. Unmaps all LUN paths for the volume
+2. Removes the multipath device and SCSI paths from the host
+3. Clears the LDEV label on the array
+4. Removes the registry entry
+
+---
+
+## Zero Page Reclamation
+
+When the `discard_zero_page` configuration property is enabled (`1`), the plugin triggers zero page reclamation during `deactivate_volume`. This instructs the array to scan the LDEV for pages filled entirely with zeros and return them to the DP pool's free space.
+
+**Benefits**:
+
+- Recovers thin-provisioning capacity after large deletions within the guest filesystem
+- Especially effective after VMs are migrated or workloads are rebalanced
+- Operates at the array level with no guest-side agent required
+
+**When it triggers**: Zero page reclamation runs every time `deactivate_volume` is called (VM shutdown, migration away from a node, etc.).
+
+---
+
+## Storage-Assisted Volume Migration
+
+`volume_migrate_pool(storeid, scfg, volname, target_pool_id)` moves a volume's LDEV from its current DP pool to a different pool on the same array. The migration is performed entirely on the array side using an asynchronous copy operation.
+
+The plugin:
+
+1. Looks up the LDEV ID from the registry
+2. Initiates an array-side pool migration to `target_pool_id`
+3. The `copy_speed` parameter controls migration throughput (1-15)
+4. The LDEV ID, WWID, and LUN mappings remain unchanged
+5. Updates the registry after migration completes
+
+This is useful for rebalancing storage pools, moving workloads between tiers (e.g., SSD to HDD), or evacuating a pool before maintenance.
+
+---
+
+## Consistency Group Snapshots
+
+`volume_snapshot_consistency_group(scfg, storeid, volnames_arrayref, snap)` creates an atomic, crash-consistent snapshot across multiple volumes simultaneously. All volumes in the group are snapshotted at the same array-side point in time.
+
+Use cases:
+
+- Multi-disk VMs that require consistent state across all disks (e.g., database data + log volumes)
+- Coordinated snapshots across related VMs
+
+The plugin:
+
+1. Accepts an array reference of volume names to snapshot together
+2. Issues a single consistency group snapshot request to the array
+3. Stores snapshot metadata (S-VOL LDEV IDs, WWIDs, snapshot IDs) for each volume in the registry
+4. All volumes in the group share the same snapshot name
+
+Individual snapshot operations (delete, rollback) can still be performed per-volume after the group snapshot is created.
 
 ---
 
@@ -301,6 +380,10 @@ The plugin supports live and offline VM migration between PVE cluster nodes:
    - Unmaps the LUN from the source node's host group
 
 This ensures each LUN is mapped only to the active node, keeping the per-host LUN count low.
+
+### Multi-Attach
+
+The `activate_volume` and `deactivate_volume` operations handle concurrent multi-node mappings for scenarios where a volume needs to be accessible from multiple nodes simultaneously (e.g., during live migration overlap or shared-disk clusters). The plugin tracks the set of active nodes per volume and only unmaps the LUN when the last node deactivates it.
 
 ---
 

@@ -67,6 +67,7 @@ Additionally, a standalone CLI tool exists for replication management:
 - Clone-from-snapshot support
 - Volume resize with array-side size verification and buffer flush
 - Orphan detection and registry cleanup
+- Manage/unmanage volumes (import existing LDEVs, release without deletion)
 
 ### RestClient
 
@@ -116,6 +117,7 @@ Additionally, a standalone CLI tool exists for replication management:
 - On VM migration: map LUN to target node first, then unmap from source after migration completes
 - Per-host LUN count = number of VMs on that node (not total cluster VMs)
 - Example: 3,000 VMs across 10 nodes = ~300 LUNs per host, well within limits
+- **Multi-attach**: When a volume must be accessible from multiple nodes simultaneously (e.g., during live migration overlap or shared-disk clusters), `activate_volume` and `deactivate_volume` track concurrent mappings and only unmap the LUN when the last node deactivates it
 
 ## State Management
 
@@ -131,14 +133,16 @@ All persistent state is stored under `/etc/pve/priv/hitachiblock/` which is auto
 ### Allocate Disk (`alloc_image`)
 
 1. Generate volname `vm-<VMID>-disk-<N>`
-2. Create LDEV (async) on DP pool with requested size
-3. Set LDEV label `pve:<storeid>:<volname>`
-4. If label-set fails, delete the LDEV (partial failure recovery)
-5. Register volname/LDEV/WWID in registry
-6. Apply QoS limits if `qos_upper_iops` or `qos_upper_mbps` configured
-7. Get local FC WWNs, find/create host group on target ports
-8. Map LUN to local node's host group
-9. SCSI rescan + wait for `/dev/mapper/<wwid>`
+2. If `ldev_range` is configured, select an available LDEV ID within the specified range; otherwise let the array auto-assign
+3. Create LDEV (async) on DP pool with requested size
+4. Set LDEV label `pve:<storeid>:<volname>`
+5. If label-set fails, delete the LDEV (partial failure recovery)
+6. Register volname/LDEV/WWID in registry
+7. Apply QoS limits if any QoS parameters are configured (upper/lower bounds, priority)
+8. Get local FC WWNs, find/create host group on target ports
+9. If `port_scheduler` is enabled, select the target port via round-robin rotation across the configured ports
+10. Map LUN to local node's host group
+11. SCSI rescan + wait for `/dev/mapper/<wwid>`
 
 ### Free Disk (`free_image`)
 

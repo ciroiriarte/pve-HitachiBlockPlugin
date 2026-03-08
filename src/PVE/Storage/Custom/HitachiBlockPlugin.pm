@@ -98,6 +98,55 @@ sub properties {
             minimum     => 0,
             optional    => 1,
         },
+        qos_lower_iops => {
+            description => "Default lower IOPS guarantee per LDEV.",
+            type        => 'integer',
+            minimum     => 0,
+            optional    => 1,
+        },
+        qos_lower_mbps => {
+            description => "Default lower throughput guarantee per LDEV in MB/s.",
+            type        => 'integer',
+            minimum     => 0,
+            optional    => 1,
+        },
+        qos_priority => {
+            description => "Default QoS I/O response priority (1=high, 2=medium, 3=low).",
+            type        => 'integer',
+            minimum     => 1,
+            maximum     => 3,
+            optional    => 1,
+        },
+        ldev_range => {
+            description => "Restrict LDEV ID allocation to a range (e.g. '1000-1999' or '0x3E8-0x7CF').",
+            type        => 'string',
+            optional    => 1,
+        },
+        discard_zero_page => {
+            description => "Reclaim zero-filled pages on volume deactivation (thin pool space recovery).",
+            type        => 'boolean',
+            default     => 0,
+            optional    => 1,
+        },
+        port_scheduler => {
+            description => "Enable round-robin port selection for LUN mappings (distributes I/O across ports).",
+            type        => 'boolean',
+            default     => 0,
+            optional    => 1,
+        },
+        copy_speed => {
+            description => "Array-side copy speed for clone operations (1-15, default 3).",
+            type        => 'integer',
+            minimum     => 1,
+            maximum     => 15,
+            optional    => 1,
+        },
+        group_delete => {
+            description => "Auto-delete empty host groups on storage deactivation.",
+            type        => 'boolean',
+            default     => 0,
+            optional    => 1,
+        },
     };
 }
 
@@ -117,8 +166,16 @@ sub options {
         content      => { optional => 1 },
         username       => { optional => 1 },
         password       => { optional => 1 },
-        qos_upper_iops => { optional => 1 },
-        qos_upper_mbps => { optional => 1 },
+        qos_upper_iops    => { optional => 1 },
+        qos_upper_mbps    => { optional => 1 },
+        qos_lower_iops    => { optional => 1 },
+        qos_lower_mbps    => { optional => 1 },
+        qos_priority      => { optional => 1 },
+        ldev_range        => { optional => 1 },
+        discard_zero_page => { optional => 1 },
+        port_scheduler    => { optional => 1 },
+        copy_speed        => { optional => 1 },
+        group_delete      => { optional => 1 },
     };
 }
 
@@ -162,7 +219,8 @@ sub on_delete_hook {
 
 # ── Storage Lifecycle ──
 
-my %_clients;  # cache: storeid -> RestClient
+my %_clients;        # cache: storeid -> RestClient
+my %_port_counters;  # port scheduler: storeid -> next port index
 
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
@@ -185,6 +243,12 @@ sub deactivate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
 
     if (my $client = delete $_clients{$storeid}) {
+        # Auto-delete empty host groups if configured
+        if ($scfg->{group_delete}) {
+            eval { $class->_cleanup_empty_host_groups($storeid, $scfg, $client) };
+            warn "Host group cleanup warning: $@" if $@;
+        }
+
         eval { $client->logout() };
     }
 
@@ -232,11 +296,17 @@ sub alloc_image {
     my $size_mb = ceil($size / 1024);
     $size_mb = 1 if $size_mb < 1;
 
-    # Create LDEV
-    my $result = $client->create_ldev(
+    # Create LDEV (with optional LDEV range restriction)
+    my %create_opts = (
         pool_id => $scfg->{pool_id},
         size_mb => $size_mb,
     );
+    if ($scfg->{ldev_range}) {
+        my $ldev_id = $class->_next_ldev_in_range($client, $scfg);
+        $create_opts{ldev_id} = $ldev_id;
+    }
+
+    my $result = $client->create_ldev(%create_opts);
     my $ldev_id = $result->{resourceId}
         or die "Failed to get LDEV ID from create response\n";
 
@@ -260,13 +330,14 @@ sub alloc_image {
     );
 
     # Apply QoS limits if configured
-    if ($scfg->{qos_upper_iops} || $scfg->{qos_upper_mbps}) {
-        eval {
-            my %qos;
-            $qos{upper_iops} = $scfg->{qos_upper_iops} if $scfg->{qos_upper_iops};
-            $qos{upper_mbps} = $scfg->{qos_upper_mbps} if $scfg->{qos_upper_mbps};
-            $client->set_ldev_qos($ldev_id, %qos);
-        };
+    my %qos;
+    $qos{upper_iops}        = $scfg->{qos_upper_iops} if $scfg->{qos_upper_iops};
+    $qos{upper_mbps}        = $scfg->{qos_upper_mbps} if $scfg->{qos_upper_mbps};
+    $qos{lower_iops}        = $scfg->{qos_lower_iops} if $scfg->{qos_lower_iops};
+    $qos{lower_mbps}        = $scfg->{qos_lower_mbps} if $scfg->{qos_lower_mbps};
+    $qos{response_priority} = $scfg->{qos_priority}   if $scfg->{qos_priority};
+    if (%qos) {
+        eval { $client->set_ldev_qos($ldev_id, %qos) };
         warn "QoS application warning: $@" if $@;
     }
 
@@ -440,6 +511,12 @@ sub deactivate_volume {
     eval {
         my $client = $class->_client($storeid);
         $class->_unmap_lun_from_local($storeid, $scfg, $client, $target_ldev_id);
+
+        # Reclaim zero-filled pages for thin pool space recovery
+        if ($scfg->{discard_zero_page}) {
+            eval { $client->reclaim_zero_pages($target_ldev_id) };
+            warn "Zero page reclamation warning: $@" if $@;
+        }
     };
     warn "LUN unmap warning: $@" if $@;
 
@@ -494,11 +571,14 @@ sub volume_snapshot {
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
     my $snap_group = "pve_${storeid}_${snap}";
 
-    my $result = $client->create_snapshot(
+    my %snap_opts = (
         pvol_ldev_id   => $ldev_id,
         snap_pool_id   => $snap_pool_id,
         snapshot_group => $snap_group,
     );
+    $snap_opts{copy_speed} = $scfg->{copy_speed} if $scfg->{copy_speed};
+
+    my $result = $client->create_snapshot(%snap_opts);
 
     # Retrieve S-VOL details from the created snapshot pair
     my $svol_ldev_id;
@@ -642,11 +722,12 @@ sub volume_has_feature {
     my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running) = @_;
 
     my %features = (
-        snapshot => { current => 1 },
-        clone    => { current => 1, snap => 1 },
-        copy     => { current => 1, snap => 1 },
+        snapshot   => { current => 1 },
+        clone      => { current => 1, snap => 1 },
+        copy       => { current => 1, snap => 1 },
         sparseinit => { current => 1 },
-        template => { current => 1 },
+        template   => { current => 1 },
+        resize     => { current => 1 },
     );
 
     my $opts = $features{$feature} || return 0;
@@ -686,6 +767,8 @@ sub clone_image {
 
     my $new_ldev_id;
 
+    my $copy_speed = $scfg->{copy_speed};
+
     if ($is_full) {
         # Full clone: create new independent LDEV, copy data via array-side clone
         my $result = $client->create_ldev(
@@ -700,6 +783,7 @@ sub clone_image {
             svol_ldev_id   => $new_ldev_id,
             snap_pool_id   => $snap_pool_id,
             snapshot_group => "pve_clone_${storeid}",
+            ($copy_speed ? (copy_speed => $copy_speed) : ()),
         );
     } else {
         # Linked clone: Thin Image pair (S-VOL shares blocks via CoW)
@@ -715,6 +799,7 @@ sub clone_image {
             svol_ldev_id   => $new_ldev_id,
             snap_pool_id   => $snap_pool_id,
             snapshot_group => "pve_lclone_${storeid}",
+            ($copy_speed ? (copy_speed => $copy_speed) : ()),
         );
     }
 
@@ -916,7 +1001,7 @@ sub _map_lun_to_local {
 
     return unless @$wwns;
 
-    my @ports = split(/,/, $scfg->{target_ports} || '');
+    my @ports = $class->_select_ports($storeid, $scfg);
 
     for my $port_id (@ports) {
         $port_id =~ s/^\s+|\s+$//g;
@@ -998,6 +1083,90 @@ sub _next_volname {
     return "vm-${vmid}-disk-" . ($max_seq + 1);
 }
 
+sub _select_ports {
+    my ($class, $storeid, $scfg) = @_;
+
+    my @all_ports = split(/,/, $scfg->{target_ports} || '');
+    @all_ports = map { s/^\s+|\s+$//g; $_ } @all_ports;
+
+    return @all_ports unless $scfg->{port_scheduler} && @all_ports > 2;
+
+    # Round-robin: select 2 ports for multipath redundancy
+    my $idx = ($_port_counters{$storeid} || 0) % scalar(@all_ports);
+    my $next_idx = ($idx + 1) % scalar(@all_ports);
+
+    my @selected = ($all_ports[$idx], $all_ports[$next_idx]);
+    $_port_counters{$storeid} = $next_idx + 1;
+
+    return @selected;
+}
+
+sub _next_ldev_in_range {
+    my ($class, $client, $scfg) = @_;
+
+    my $range = $scfg->{ldev_range}
+        or die "ldev_range is not configured\n";
+
+    my ($min, $max);
+    if ($range =~ /^(0x[0-9a-f]+)-(0x[0-9a-f]+)$/i) {
+        $min = hex($1);
+        $max = hex($2);
+    } elsif ($range =~ /^(\d+)-(\d+)$/) {
+        $min = int($1);
+        $max = int($2);
+    } else {
+        die "Invalid ldev_range format '$range' (expected 'min-max')\n";
+    }
+
+    die "Invalid ldev_range: min ($min) > max ($max)\n" if $min > $max;
+
+    # Get existing LDEVs to find used IDs
+    my $ldevs = $client->list_ldevs(pool_id => $scfg->{pool_id});
+    my %used;
+    for my $ldev (@$ldevs) {
+        $used{$ldev->{ldevId}} = 1 if defined $ldev->{ldevId};
+    }
+
+    for my $id ($min .. $max) {
+        return $id unless $used{$id};
+    }
+
+    die "No available LDEV IDs in range $range ($min-$max)\n";
+}
+
+sub _cleanup_empty_host_groups {
+    my ($class, $storeid, $scfg, $client) = @_;
+
+    my @ports = split(/,/, $scfg->{target_ports} || '');
+    my $hostname = `hostname -s`;
+    chomp($hostname);
+    my $hg_prefix = "PVE_${hostname}";
+
+    for my $port_id (@ports) {
+        $port_id =~ s/^\s+|\s+$//g;
+        my $groups = $client->list_host_groups(port_id => $port_id);
+
+        for my $hg (@$groups) {
+            next unless ($hg->{hostGroupName} || '') =~ /^\Q$hg_prefix\E/;
+
+            # Check if host group has any LUN mappings
+            my $luns = eval {
+                $client->list_luns(
+                    port_id           => $port_id,
+                    host_group_number => $hg->{hostGroupNumber},
+                );
+            } || [];
+
+            if (!@$luns) {
+                eval { $client->delete_host_group($hg->{hostGroupId}) };
+                warn "Delete host group $hg->{hostGroupId}: $@" if $@;
+            }
+        }
+    }
+
+    return 1;
+}
+
 sub vmid_from_volname {
     my ($volname) = @_;
 
@@ -1012,6 +1181,170 @@ sub parse_volname {
     }
 
     die "unable to parse volume name '$volname'\n";
+}
+
+# ── Manage / Unmanage Volumes (LDEV Import) ──
+
+sub manage_volume {
+    my ($class, $storeid, $scfg, $ldev_id, $vmid) = @_;
+
+    die "ldev_id is required\n" unless defined $ldev_id;
+    die "vmid is required\n"    unless defined $vmid;
+
+    my $client = $class->_client($storeid);
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
+
+    # Verify LDEV exists on the array
+    my $ldev = $client->get_ldev($ldev_id);
+    die "LDEV $ldev_id not found on array\n" unless $ldev;
+
+    # Parse current size from array
+    my $size_mb = 0;
+    if ($ldev->{byteFormatCapacity}) {
+        my $cap = $ldev->{byteFormatCapacity};
+        if ($cap =~ /^([\d.]+)\s*G/i)    { $size_mb = int($1 * 1024); }
+        elsif ($cap =~ /^([\d.]+)\s*T/i) { $size_mb = int($1 * 1024 * 1024); }
+        elsif ($cap =~ /^([\d.]+)\s*M/i) { $size_mb = int($1); }
+    }
+
+    # Generate volume name and set label
+    my $name = $class->_next_volname($config, $vmid);
+    my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $name);
+    $client->set_ldev_label($ldev_id, $label);
+
+    # Register in local map
+    my $wwid = $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+    $config->register_ldev($name, $ldev_id,
+        wwid    => $wwid,
+        size_mb => $size_mb,
+        pool_id => $ldev->{poolId} // $scfg->{pool_id},
+    );
+
+    # Map LUN and discover device
+    eval { $class->_map_lun_to_local($storeid, $scfg, $client, $ldev_id) };
+    warn "LUN mapping warning: $@" if $@;
+
+    eval {
+        $multipath->rescan_scsi_hosts();
+        $multipath->wait_for_device($wwid);
+    };
+    warn "Device discovery warning: $@" if $@;
+
+    return $name;
+}
+
+sub unmanage_volume {
+    my ($class, $storeid, $scfg, $volname) = @_;
+
+    die "volname is required\n" unless $volname;
+
+    my $client = $class->_client($storeid);
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
+
+    my ($ldev_id, $meta) = $config->lookup_ldev($volname);
+    die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+
+    # Remove device and unmap from local node
+    eval {
+        my $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+        $multipath->remove_device($wwid);
+        $class->_unmap_lun_from_local($storeid, $scfg, $client, $ldev_id);
+    };
+    warn "Unmanage cleanup warning: $@" if $@;
+
+    # Clear the PVE label from the LDEV (LDEV itself is NOT deleted)
+    eval { $client->set_ldev_label($ldev_id, '') };
+    warn "Label clear warning: $@" if $@;
+
+    # Remove from registry
+    $config->unregister_ldev($volname);
+
+    return $ldev_id;
+}
+
+# ── Consistency Group Snapshots ──
+
+sub volume_snapshot_consistency_group {
+    my ($class, $scfg, $storeid, $volnames, $snap) = @_;
+
+    die "volnames arrayref is required\n" unless ref $volnames eq 'ARRAY' && @$volnames;
+
+    my $client = $class->_client($storeid);
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
+
+    my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
+    my $snap_group = "pve_cg_${storeid}_${snap}";
+
+    # Create consistency group snapshot across all volumes
+    for my $volname (@$volnames) {
+        my ($ldev_id) = $config->lookup_ldev($volname);
+        die "Volume '$volname' not found\n" unless defined $ldev_id;
+
+        my %snap_opts = (
+            pvol_ldev_id        => $ldev_id,
+            snap_pool_id        => $snap_pool_id,
+            snapshot_group      => $snap_group,
+            is_consistency_group => 1,
+        );
+        $snap_opts{copy_speed} = $scfg->{copy_speed} if $scfg->{copy_speed};
+
+        $client->create_snapshot(%snap_opts);
+    }
+
+    # Register snapshot metadata for each volume
+    for my $volname (@$volnames) {
+        my ($ldev_id) = $config->lookup_ldev($volname);
+
+        eval {
+            my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id);
+            for my $s (@$snaps) {
+                if (($s->{snapshotGroupName} || '') eq $snap_group) {
+                    my %snap_meta = (
+                        snapshot_group    => $snap_group,
+                        pvol_ldev_id      => $ldev_id,
+                        consistency_group => 1,
+                    );
+                    if (defined $s->{svolLdevId}) {
+                        $snap_meta{svol_ldev_id} = $s->{svolLdevId};
+                        $snap_meta{svol_wwid} = $multipath->ldev_to_wwid(
+                            $scfg->{storage_id}, $s->{svolLdevId});
+                    }
+                    $snap_meta{snapshot_id} = $s->{snapshotId} if defined $s->{snapshotId};
+                    $config->register_snapshot($volname, $snap, %snap_meta);
+                    last;
+                }
+            }
+        };
+        warn "Consistency group snapshot metadata warning for '$volname': $@" if $@;
+    }
+
+    return undef;
+}
+
+# ── Storage-Assisted Volume Migration ──
+
+sub volume_migrate_pool {
+    my ($class, $storeid, $scfg, $volname, $target_pool_id) = @_;
+
+    die "volname is required\n"        unless $volname;
+    die "target_pool_id is required\n" unless defined $target_pool_id;
+
+    my $client = $class->_client($storeid);
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+
+    my ($ldev_id, $meta) = $config->lookup_ldev($volname);
+    die "Volume '$volname' not found\n" unless defined $ldev_id;
+
+    # Migrate LDEV to the target pool (array-side, no host I/O)
+    $client->migrate_ldev($ldev_id, $target_pool_id);
+
+    # Update registry with new pool
+    $config->register_ldev($volname, $ldev_id, %$meta, pool_id => $target_pool_id);
+
+    return 1;
 }
 
 # ── Orphan Detection ──

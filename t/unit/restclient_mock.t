@@ -230,6 +230,134 @@ subtest 'set_ldev_qos_sends_limits' => sub {
     is($log[0]{body}{upperTransferRate}, 500, 'throughput limit');
 };
 
+subtest 'set_ldev_qos_lower_bounds_and_priority' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    $client->set_ldev_qos(42,
+        upper_iops        => 10000,
+        lower_iops        => 1000,
+        upper_mbps        => 500,
+        lower_mbps        => 100,
+        response_priority => 1,
+    );
+
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{body}{upperIops}, 10000, 'upper IOPS');
+    is($log[0]{body}{lowerIops}, 1000, 'lower IOPS');
+    is($log[0]{body}{upperTransferRate}, 500, 'upper throughput');
+    is($log[0]{body}{lowerTransferRate}, 100, 'lower throughput');
+    is($log[0]{body}{responsePriority}, 1, 'response priority');
+};
+
+# ── Zero Page Reclamation ──
+
+subtest 'reclaim_zero_pages_sends_action' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    $client->reclaim_zero_pages(42);
+
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{method}, 'POST', 'POST method');
+    like($log[0]{url}, qr{/ldevs/42/actions/discard-zero-page/invoke}, 'discard URL');
+};
+
+subtest 'reclaim_zero_pages_requires_ldev_id' => sub {
+    my $client = new_mock_client();
+    eval { $client->reclaim_zero_pages() };
+    like($@, qr/ldev_id is required/, 'needs ldev_id');
+};
+
+# ── Storage-Assisted Migration ──
+
+subtest 'migrate_ldev_sends_change_pool' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    $client->migrate_ldev(42, 5);
+
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{method}, 'POST', 'POST method');
+    like($log[0]{url}, qr{/ldevs/42/actions/change-pool/invoke}, 'change-pool URL');
+    is($log[0]{body}{parameters}{poolId}, 5, 'target pool in body');
+};
+
+subtest 'migrate_ldev_requires_params' => sub {
+    my $client = new_mock_client();
+    eval { $client->migrate_ldev() };
+    like($@, qr/ldev_id is required/, 'needs ldev_id');
+
+    eval { $client->migrate_ldev(42) };
+    like($@, qr/target_pool_id is required/, 'needs target_pool_id');
+};
+
+# ── Host Group Deletion ──
+
+subtest 'delete_host_group_sends_delete' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    $client->delete_host_group('CL1-A,1');
+
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{method}, 'DELETE', 'DELETE method');
+    like($log[0]{url}, qr{/host-groups/CL1-A,1$}, 'correct URL');
+};
+
+subtest 'delete_host_group_requires_id' => sub {
+    my $client = new_mock_client();
+    eval { $client->delete_host_group() };
+    like($@, qr/host_group_id is required/, 'needs host_group_id');
+};
+
+# ── Snapshot Consistency Group and Copy Speed ──
+
+subtest 'create_snapshot_with_consistency_group' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    $client->create_snapshot(
+        pvol_ldev_id        => 42,
+        snap_pool_id        => 1,
+        snapshot_group      => 'pve_cg_test',
+        is_consistency_group => 1,
+    );
+
+    my @log = MockRestClient::get_request_log();
+    ok($log[0]{body}{isConsistencyGroup}, 'consistency group enabled');
+};
+
+subtest 'create_snapshot_with_copy_speed' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    $client->create_snapshot(
+        pvol_ldev_id   => 42,
+        snap_pool_id   => 1,
+        snapshot_group => 'pve_test',
+        copy_speed     => 10,
+    );
+
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{body}{copySpeed}, 10, 'copy speed in body');
+};
+
+subtest 'clone_snapshot_with_copy_speed' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    $client->clone_snapshot_to_ldev(
+        pvol_ldev_id   => 42,
+        svol_ldev_id   => 100,
+        snap_pool_id   => 1,
+        copy_speed     => 8,
+    );
+
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{body}{copySpeed}, 8, 'copy speed in clone body');
+};
+
 # ── Replication Operations ──
 
 subtest 'create_truecopy_pair' => sub {

@@ -1,3 +1,18 @@
+pve-storage-hitachiblock (1.1.0-1) stable; urgency=medium
+
+  * Manage/unmanage volumes (LDEV import and release)
+  * Zero page reclamation (discard_zero_page) for thin pool space recovery
+  * QoS lower bounds (qos_lower_iops, qos_lower_mbps) and I/O priority (qos_priority)
+  * LDEV range restriction (ldev_range) for multi-tenant environments
+  * Storage-assisted volume migration between pools (volume_migrate_pool)
+  * Consistency group snapshots (volume_snapshot_consistency_group)
+  * Port scheduler: round-robin LUN mapping across target ports
+  * Copy speed control for array-side clone/snapshot operations
+  * Host group auto-delete on storage deactivation (group_delete)
+  * Multi-attach support (concurrent LUN mappings to multiple nodes)
+
+ -- PVE Hitachi Plugin Developers <dev@example.com>  Fri, 07 Mar 2026 00:00:00 +0000
+
 pve-storage-hitachiblock (1.0.0-1) stable; urgency=medium
 
   * Replication CLI tool (TrueCopy, Universal Replicator, GAD)

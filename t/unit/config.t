@@ -62,6 +62,15 @@ subtest 'validate_config' => sub {
 
     eval { PVE::Storage::HitachiBlock::Config->validate_config({ %$valid, platform => 'invalid' }) };
     like($@, qr/platform must be/, 'invalid platform caught');
+
+    # LDEV range validation
+    ok(PVE::Storage::HitachiBlock::Config->validate_config({ %$valid, ldev_range => '1000-1999' }),
+       'decimal ldev_range valid');
+    ok(PVE::Storage::HitachiBlock::Config->validate_config({ %$valid, ldev_range => '0x3E8-0x7CF' }),
+       'hex ldev_range valid');
+
+    eval { PVE::Storage::HitachiBlock::Config->validate_config({ %$valid, ldev_range => 'bad' }) };
+    like($@, qr/ldev_range must be/, 'invalid ldev_range caught');
 };
 
 # ── Registry Operations (with temp dir) ──
