@@ -132,17 +132,20 @@ All persistent state is stored under `/etc/pve/priv/hitachiblock/` which is auto
 
 ### Allocate Disk (`alloc_image`)
 
-1. Generate volname `vm-<VMID>-disk-<N>`
-2. If `ldev_range` is configured, select an available LDEV ID within the specified range; otherwise let the array auto-assign
-3. Create LDEV (async) on DP pool with requested size
-4. Set LDEV label `pve:<storeid>:<volname>`
-5. If label-set fails, delete the LDEV (partial failure recovery)
-6. Register volname/LDEV/WWID in registry
-7. Apply QoS limits if any QoS parameters are configured (upper/lower bounds, priority)
-8. Get local FC WWNs, find/create host group on target ports
-9. If `port_scheduler` is enabled, select the target port via round-robin rotation across the configured ports
-10. Map LUN to local node's host group
-11. SCSI rescan + wait for `/dev/mapper/<wwid>`
+The registry entry is committed **last**, once the volume is fully provisioned and
+discoverable; any failure before that rolls back the array-side resources and the
+name reservation, so a failed allocation never leaves a "ghost" volume.
+
+1. Reserve a unique volname `vm-<VMID>-disk-<N>` under the cluster lock
+2. If `ldev_range` is configured, select an available LDEV ID within the range; otherwise let the array auto-assign
+3. Create the LDEV (async) on the DP pool with the requested size
+4. Set the LDEV label `pve:<storeid>:<volname>`
+5. Apply QoS limits if configured (**best-effort** — a QoS failure does not fail the disk)
+6. Find/create the host group for the local FC WWNs; if `port_scheduler` is enabled, select the target port pair deterministically from the LDEV ID
+7. Map the LUN to the local node's host group (**prerequisite** — fatal on failure)
+8. SCSI rescan; resolve the WWID (array `naaId`, else synthesized, else sysfs) and wait for `/dev/mapper/<wwid>`
+9. **Commit** the volname/LDEV/WWID to the registry
+10. On any failure in steps 2–9: unmap the LUN, delete the LDEV, and release the name reservation
 
 ### Free Disk (`free_image`)
 
@@ -166,21 +169,27 @@ All persistent state is stored under `/etc/pve/priv/hitachiblock/` which is auto
 3. Retrieve S-VOL metadata (LDEV ID, WWID, array snapshot ID)
 4. Store snapshot metadata in registry
 
-### Clone (Linked)
+### Clone (Linked) — `clone_image`
 
-1. Look up source LDEV (or S-VOL if cloning from snapshot)
-2. Create Thin Image pair; S-VOL shares blocks via CoW
-3. Set label on S-VOL LDEV
-4. Register new volume with parent tracking
-5. Map LUN, rescan, wait for device
+Linked clones are the only clone path that runs through the plugin. The source must
+be a base image or a snapshot.
 
-### Clone (Full)
+1. Look up the source LDEV (or the snapshot's S-VOL if cloning from a snapshot)
+2. Create a thin S-VOL LDEV
+3. Create a **split** Thin Image pair (`autoSplit=true`, `isClone` unset): the S-VOL
+   becomes host R/W (status `PSUS`) while still sharing unchanged blocks with the
+   source via the pool (copy-on-write)
+4. Set the label on the S-VOL LDEV
+5. Register the new volume with parent tracking (`parent_volname`, `parent_snap`)
+6. Map LUN, rescan, resolve WWID, wait for device
 
-1. Create Thin Image snapshot of source
-2. Create new independent LDEV
-3. Array-side copy from snapshot to new LDEV
-4. Delete temporary snapshot
-5. Register, map, rescan
+### Clone (Full) — handled by Proxmox core, not the plugin
+
+A full/independent copy does **not** go through `clone_image`. Proxmox allocates a new
+volume (`alloc_image`) on the target and copies the data itself over the device path
+(`qemu-img convert` offline, or drive-mirror online) — the same machinery as "Move
+Storage". The result has no dependency on the source. See
+[Operations § Clones](operations.md#clones).
 
 ### Volume Resize
 

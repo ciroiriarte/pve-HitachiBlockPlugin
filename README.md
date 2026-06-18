@@ -1,47 +1,87 @@
 # PVE Hitachi Block Storage Plugin
 
-Proxmox VE storage plugin for Hitachi FC-based block storage systems (VSP G series and VSP One Block).
+A [Proxmox VE](https://www.proxmox.com/) storage plugin for Hitachi Fibre Channel
+block storage (VSP One Block, VSP E series, and VSP G series). It provisions
+**one LUN per virtual disk** and offloads storage services — snapshots, clones,
+thin provisioning, QoS, replication — to the array, in the spirit of VMware vVols.
 
-Provides **1 LUN per virtual disk** with storage services offloaded to the array, similar to VMware VVols.
+> ### ⚠️ Project status: pre-production, not yet hardware-validated
+>
+> This plugin was developed against the Hitachi Configuration Manager REST API
+> **specification and documentation**, and its logic is covered by an automated unit
+> test suite — but **it has not yet been validated against a live array or a real
+> Proxmox cluster.** The unit tests mock the array, the REST client, and the
+> multipath/sysfs layer, so they cannot prove that provisioning, mapping, snapshots,
+> or clones behave correctly on actual hardware.
+>
+> **Do not use it against production data or a production cluster yet.** Treat it as
+> alpha. Before relying on it, work through
+> [`docs/INTEGRATION_CHECKLIST.md`](docs/INTEGRATION_CHECKLIST.md) on your own array
+> (lab/test first) — it lists every assumption the code makes, how to verify each on
+> hardware, and what to change if it is wrong. Operations that create or delete LDEVs,
+> map LUNs, or snapshot/clone volumes can affect or destroy data if an assumption is
+> wrong on your model/microcode.
+>
+> Issue reports, and especially hardware-validation results, are very welcome — see
+> [Contributing](#contributing).
 
 ## Features
 
-- **Thin provisioning** via Hitachi DP pools
-- **Snapshots** using Thin Image (array-offloaded, per-LDEV)
-- **Linked and full clones** via Thin Image / ShadowImage
-- **Clone from snapshot** support
-- **Online volume resize** with array-side verification and host-side multipath resize
-- **QoS** per-LDEV IOPS and throughput limits
-- **Active-node-only LUN mapping** for scalability
-- **Capacity monitoring** reported to PVE UI
-- **Session auto-reconnect** on expiry
-- **Orphan detection** and registry cleanup
-- **Partial failure recovery** during volume allocation
-- **Replication CLI tool** for TrueCopy, Universal Replicator, and Global-Active Device (GAD)
-- **Snapshot metadata tracking** in cluster-replicated registry
+- **1 LUN per virtual disk** — direct array volumes, no LVM layer.
+- **Thin provisioning** via Hitachi Dynamic Provisioning (DP) pools.
+- **Snapshots** — array-offloaded Thin Image, per LDEV, with metadata tracked in a
+  cluster-replicated registry.
+- **Copy-on-write linked clones** — space-efficient Thin Image clones from a base
+  image or a snapshot; full copies are handled by Proxmox via the device path.
+- **Online volume resize** — array expand + host-side multipath resize.
+- **QoS** — per-LDEV upper/lower IOPS and throughput limits and I/O priority.
+- **Multipath-aware** — FC WWN discovery, ALUA device stanza, automatic WWID
+  whitelisting (`find_multipaths strict`), and authoritative WWID from the array.
+- **Active-node-only LUN mapping** — keeps per-host LUN counts low; live migration
+  remaps on the fly.
+- **Management-plane controller redundancy** — `mgmt_ip` accepts multiple
+  per-controller endpoints with automatic failover and re-authentication.
+- **Storage migration** — Move Storage to/from file stores (hot/cold), plus
+  `volume_export`/`volume_import` for offline cross-node / `pvesm` migration.
+- **Disk reassignment** (`rename_volume`), **base/template images**, **orphan
+  detection**, and **partial-failure rollback** during provisioning.
+- **Replication CLI** (`hitachiblock-repl`) for TrueCopy, Universal Replicator, and
+  Global-Active Device (GAD).
 
-## Supported Platforms
+See [Operations](docs/operations.md) for how each is used.
 
-| Platform | API Provider | Default Port |
-|----------|-------------|--------------|
-| VSP G series | Ops Center API Configuration Manager | 23451 |
-| VSP One Block | Native REST API (built into controller) | 443 |
+## Supported platforms
 
-Both platforms use the same Configuration Manager REST API endpoints.
+| Platform | `platform` | API endpoint | Default port |
+|----------|------------|--------------|--------------|
+| VSP One Block | `vsp_one` | Built-in REST API on the controller | 443 |
+| VSP E series (e.g. E590H) | `vsp_e` | Embedded Configuration Manager REST API on the GUM | 443 |
+| VSP G series | `vsp_g` | Ops Center API Configuration Manager server | 23451 |
 
-## Quick Start
+All platforms speak the standard Configuration Manager REST API object model
+(`/ConfigurationManager/v1/objects/storages/<storageDeviceId>/…`). The only
+difference is the management endpoint (IP + port). See
+[Configuration § Platform Differences](docs/configuration.md#platform-differences).
+
+## Requirements
+
+- A Proxmox VE node/cluster with Fibre Channel HBAs and `multipath-tools`.
+- A Hitachi VSP array reachable over the Configuration Manager REST API, with a DP
+  pool, FC target ports, and an API user.
+- FC zoning between the hosts and the array.
+
+Full host- and array-side prerequisites:
+[Installation](docs/installation.md) · [Storage Appliance Prerequisites](docs/prerequisites.md).
+
+## Quick start
 
 ```bash
-# Install
-make install
+# Build and install on each PVE node
+make install          # or: make deb && dpkg -i ../pve-storage-hitachiblock_*_all.deb
 systemctl restart pvedaemon
-
-# Or build Debian package
-make deb
-dpkg -i ../pve-storage-hitachiblock_1.1.0-1_all.deb
 ```
 
-Configure in `/etc/pve/storage.cfg`:
+Add the storage to `/etc/pve/storage.cfg`:
 
 ```
 hitachiblock: myarray
@@ -50,33 +90,57 @@ hitachiblock: myarray
     pool_id 0
     snap_pool_id 1
     target_ports CL1-A,CL2-A
-    host_mode LINUX
+    host_mode LINUX/IRIX
     platform vsp_one
     shared 1
     content images
     nodes node1,node2,node3
 ```
 
-Store credentials:
+Store the API credentials (kept out of `storage.cfg`, in cluster-replicated
+`/etc/pve/priv`):
 
 ```bash
 pvesm set myarray --username admin --password secret
 ```
 
+See [Configuration](docs/configuration.md) for every parameter, multi-controller
+endpoints, TLS, and QoS, and [`conf/storage.cfg.example`](conf/storage.cfg.example)
+for per-platform examples.
+
 ## Documentation
 
-- [Architecture](docs/architecture.md) - Component design and data flows
-- [Installation](docs/installation.md) - Host and array prerequisites, install steps
-- [Configuration](docs/configuration.md) - Plugin parameters, credentials, platform differences
-- [Operations](docs/operations.md) - Storage services, replication CLI, troubleshooting
-- [Storage Appliance Prerequisites](docs/prerequisites.md) - What must be configured on the Hitachi array
+- **[Documentation index](docs/README.md)** — start here.
+- [Architecture](docs/architecture.md) — components, modules, data flows.
+- [Installation](docs/installation.md) — host prerequisites, install, multipath.
+- [Configuration](docs/configuration.md) — every parameter, credentials, redundancy.
+- [Operations](docs/operations.md) — storage services, replication CLI, migration, troubleshooting.
+- [Storage Appliance Prerequisites](docs/prerequisites.md) — what to configure on the array.
+- [Hardware Integration Checklist](docs/INTEGRATION_CHECKLIST.md) — **read before trusting it** on hardware.
+- [Vendor reference extracts](docs/reference/) — distilled Hitachi REST API / user-guide notes.
 
 ## Testing
 
 ```bash
-make test   # Run unit tests
+make test    # Perl unit tests (logic + PVE contracts; the array is mocked)
 ```
+
+The unit suite does **not** touch hardware. Real validation follows
+[`docs/INTEGRATION_CHECKLIST.md`](docs/INTEGRATION_CHECKLIST.md); record results under
+`t/integration/`.
+
+## Contributing
+
+Contributions and hardware-validation reports are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md). To report a security-relevant issue, see
+[SECURITY.md](SECURITY.md).
+
+## Provenance
+
+This project's content is generated through AI prompting (Claude), directed and
+reviewed by the maintainer, who is responsible for all content. Commits carry a
+`Generated-By:` trailer to reflect this.
 
 ## License
 
-AGPL-3.0 - See [LICENSE](LICENSE)
+[AGPL-3.0](LICENSE) — © Ciro Iriarte and contributors.

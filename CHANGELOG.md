@@ -132,6 +132,12 @@ PVE plugin-contract findings). No features were removed.
   401 re-auth).
 
 ### Documentation
+- Documentation completeness pass: rewrote `README.md` (honest pre-production /
+  not-yet-hardware-validated status banner, current feature list, VSP E series,
+  fixed install version drift); added a `docs/README.md` index, `CONTRIBUTING.md`,
+  and `SECURITY.md`; and corrected stale flows in `architecture.md` (CoW linked vs
+  PVE-core full clone, register-last + rollback in `alloc_image`, deterministic port
+  selection).
 - Added `docs/reference/` Markdown extracts of the vendor PDFs in `reference/`
   (REST API Reference Guide, VSP 5000 User Guide, Ops Center Common Services),
   focused on the resources/semantics this plugin uses. These confirmed several

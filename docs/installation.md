@@ -81,7 +81,8 @@ This installs:
 
 ```bash
 make deb
-sudo dpkg -i ../pve-storage-hitachiblock_1.0.0-1_all.deb
+# the .deb is named for the version in version.mk, e.g. pve-storage-hitachiblock_1.2.0-1_all.deb
+sudo dpkg -i ../pve-storage-hitachiblock_*_all.deb
 sudo systemctl restart pvedaemon
 ```
 
