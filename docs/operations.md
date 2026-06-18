@@ -440,6 +440,61 @@ maps the LUN before the VM starts there, and the source node unmaps it afterward
 
 ---
 
+## Disk Migration Between Storage Types
+
+You can move a VM disk between a file-based store (`dir`/NFS holding `qcow2` or
+`raw`) and a Hitachi LUN in **either direction**. PVE has **no in-place "retype"** —
+moving between storage types is always a physical copy with format conversion.
+
+There are two distinct PVE mechanisms, with different requirements:
+
+### 1. Move Storage — same node/cluster (`qm disk move`, GUI "Move Storage")
+
+Allocates a new volume on the target and copies the data through QEMU over the
+device path (`filesystem_path`). It does **not** use the export/import API.
+
+- **Online (VM running):** `qemu drive-mirror` → **hot**, live, source dropped after the mirror converges.
+- **Offline (VM stopped):** `qemu-img convert` → **cold** copy.
+
+The plugin provides `alloc_image` plus a real `/dev/mapper/<wwid>` path, so this
+works both ways with on-the-fly format conversion.
+
+| Direction | Supported | Format result |
+|-----------|-----------|---------------|
+| qcow2 file → Hitachi LUN | ✅ hot or cold | qcow2 → **raw** on the LUN |
+| raw file → Hitachi LUN | ✅ hot or cold | raw (copied) |
+| Hitachi LUN → qcow2 file | ✅ hot or cold | raw → **qcow2** |
+| Hitachi LUN → raw file | ✅ hot or cold | raw (copied) |
+
+### 2. storage_migrate — offline cross-node / cross-cluster / `pvesm`
+
+Used by **offline** `qm migrate` to a node where this storage is *not* shared,
+`qm remote-migrate`, and `pvesm export`/`import`. It streams the volume using the
+`volume_export`/`volume_import` API (`raw+size`), which the plugin implements by
+`dd`-ing the raw block device — the same approach as the Ceph/RBD plugin.
+
+- Always a **cold** (offline) data copy. The source LUN must be mapped/active on the
+  source node during export (the migration framework activates it).
+- Only the **active volume state** is transferred — array-offloaded Thin Image
+  snapshots are *not* part of the stream, so migrations with snapshots are refused.
+
+> For a *running* VM whose disk is already on the Hitachi LUN, normal `qm migrate`
+> needs **no disk copy** at all — the storage is `shared`, so the LUN is simply
+> remapped to the target node (see [VM Migration](#vm-migration)). That is the
+> "hottest" path, but it does not change storage type.
+
+### Caveats (both mechanisms)
+
+- **Snapshots are not carried over.** The copy takes the active state only; flatten
+  or remove snapshots first. Thin Image snapshots are array-side, not part of a
+  qcow2 chain.
+- **The LUN side is always `raw`** (the only format this plugin advertises). qcow2
+  features (internal snapshots) are replaced by array offloads after the move.
+- **Thin reclaim:** after qcow2/raw → LUN, run `fstrim` in the guest (or enable
+  `discard_zero_page`) so the DP pool reflects actual usage.
+
+---
+
 ## Troubleshooting
 
 ### Device Not Appearing After Allocation

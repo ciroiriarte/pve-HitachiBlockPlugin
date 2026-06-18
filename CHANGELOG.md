@@ -70,6 +70,12 @@ PVE plugin-contract findings). No features were removed.
 - **`volume_size_info`:** reports size directly from the registry/array for raw
   block volumes (no `qemu-img` shelling).
 - **TLS verification:** opt-in `tls_verify` and `tls_ca_file` storage properties.
+- **Volume export/import:** implemented `volume_export`/`volume_import` and their
+  format helpers (`raw+size`, streamed via `dd` on the block device, like RBD), so
+  the storage now participates in PVE's `storage_migrate` path — offline `qm migrate`
+  to a non-shared target, `qm remote-migrate`, and `pvesm export`/`import`. (Same-node
+  "Move Storage"/`qm move-disk` already worked via the device path.) Snapshots and
+  incremental streams are not transferred. See docs/operations.md for the matrix.
 - **VSP E series support:** new `vsp_e` platform (e.g. VSP E590H) defaulting to the
   direct/embedded Configuration Manager REST API on port 443; `storage_id` and
   `mgmt_ip` descriptions clarified (storageDeviceId vs. serial; embedded GUM vs.

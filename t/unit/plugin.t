@@ -260,4 +260,23 @@ subtest 'manage_generates_volname' => sub {
        'managed LDEV gets next available volname');
 };
 
+# ── Volume Export/Import Format Gating ──
+
+subtest 'volume_import_formats_logic' => sub {
+    # Mirrors volume_import_formats / volume_export_formats: only a non-snapshot,
+    # non-incremental raw stream is offered (array snapshots are not streamed).
+    my $formats = sub {
+        my (%o) = @_;
+        return () if $o{with_snapshots};
+        return () if defined($o{base_snapshot});
+        return () if defined($o{snapshot});
+        return ('raw+size');
+    };
+
+    is_deeply([$formats->()], ['raw+size'], 'plain volume offers raw+size');
+    is_deeply([$formats->(with_snapshots => 1)], [], 'no stream with snapshots');
+    is_deeply([$formats->(base_snapshot => 'b')], [], 'no incremental stream');
+    is_deeply([$formats->(snapshot => 's')], [], 'no snapshot-specific stream');
+};
+
 done_testing();

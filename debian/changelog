@@ -14,6 +14,8 @@ pve-storage-hitachiblock (1.2.0-1) stable; urgency=medium
   * Implemented base/template images (create_base) and volume_size_info
   * Deterministic per-LDEV port selection (replaces resettable round-robin counter)
   * Opt-in TLS verification (tls_verify/tls_ca_file); 429/Retry-After handling
+  * Volume export/import (raw+size) so storage_migrate works: offline qm migrate to
+    a non-shared target, qm remote-migrate, pvesm export/import (snapshots excluded)
   * VSP E series (e.g. E590H) support via new vsp_e platform (embedded REST, port 443)
   * Self-correcting WWID discovery from sysfs; long-storeid label hashing
   * Replication CLI reads storage.cfg, adds orphans (with --auto-cleanup) and --volume

@@ -913,6 +913,102 @@ sub clone_image {
     return $new_name;
 }
 
+# ── Storage Migration (volume export / import) ──
+#
+# These let the volume participate in PVE's `storage_migrate` path — offline
+# `qm migrate` to a node where this storage is not shared, cross-cluster
+# `qm remote-migrate`, and `pvesm export`/`import`. They stream the raw block
+# device (`raw+size`), exactly like the RBD plugin. (Same-node/cluster "Move
+# Storage" / `qm move-disk` does NOT use these — it copies through qemu over the
+# device path returned by filesystem_path.)
+#
+# Array-offloaded snapshots are NOT part of the stream: only the active volume
+# state is transferred, so `with_snapshots`/incremental streams are unsupported.
+
+sub volume_export_formats {
+    my ($class, $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots) = @_;
+    return $class->volume_import_formats(
+        $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots);
+}
+
+sub volume_import_formats {
+    my ($class, $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots) = @_;
+    return () if $with_snapshots;          # array snapshots are not streamed
+    return () if defined($base_snapshot);  # no incremental streams
+    return () if defined($snapshot);       # no snapshot-specific export over the stream
+    return ('raw+size');
+}
+
+sub volume_export {
+    my ($class, $scfg, $storeid, $fh, $volname, $format, $snapshot, $base_snapshot, $with_snapshots)
+        = @_;
+
+    die "volume export format '$format' not available for $class\n" if $format ne 'raw+size';
+    die "cannot export volumes together with their snapshots in $class\n" if $with_snapshots;
+    die "cannot export a snapshot in $class\n"            if defined($snapshot);
+    die "cannot export an incremental stream in $class\n" if defined($base_snapshot);
+
+    # The LUN must already be mapped and its multipath device present on this node
+    # (the migration framework activates source volumes before export).
+    my $path = $class->filesystem_path($scfg, $volname, $storeid);
+    my ($size) = $class->volume_size_info($scfg, $storeid, $volname);
+
+    PVE::Storage::Plugin::write_common_header($fh, $size);
+    run_command(
+        ['dd', "if=$path", 'bs=4k', 'status=progress'],
+        output  => '>&' . fileno($fh),
+        # dd uses carriage returns for progress; split into individual log lines
+        errfunc => sub { print STDERR "$_[0]\n" },
+    );
+
+    return;
+}
+
+sub volume_import {
+    my ($class, $scfg, $storeid, $fh, $volname, $format, $snapshot, $base_snapshot,
+        $with_snapshots, $allow_rename) = @_;
+
+    die "volume import format '$format' not available for $class\n" if $format ne 'raw+size';
+    die "cannot import volumes together with their snapshots in $class\n" if $with_snapshots;
+    die "cannot import an incremental stream in $class\n" if defined($base_snapshot);
+
+    my (undef, $name, $vmid, undef, undef, undef, $file_format) = $class->parse_volname($volname);
+    die "cannot import format $format into a volume of format $file_format\n"
+        if $file_format ne 'raw';
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    if (defined($config->lookup_ldev($volname))) {
+        die "volume '$volname' already exists\n" if !$allow_rename;
+        warn "volume '$volname' already exists - importing with a different name\n";
+        $name = undef;   # let alloc_image reserve a fresh name under the cluster lock
+    }
+
+    # Header size is in bytes; alloc_image expects KiB.
+    my ($size) = PVE::Storage::Plugin::read_common_header($fh);
+    my $size_kb = ceil($size / 1024);
+
+    my $new_volname;
+    eval {
+        # alloc_image creates the LDEV, maps it, discovers the device, and registers
+        # it last — so on success $new_volname has a usable device path.
+        $new_volname = $class->alloc_image($storeid, $scfg, $vmid, 'raw', $name, $size_kb);
+        my $path = $class->filesystem_path($scfg, $new_volname, $storeid)
+            or die "failed to resolve path for newly allocated volume '$new_volname'\n";
+        run_command(
+            ['dd', "of=$path", 'conv=sparse', 'bs=64k'],
+            input => '<&' . fileno($fh),
+        );
+    };
+    if (my $err = $@) {
+        eval { $class->free_image($storeid, $scfg, $new_volname, 0, 'raw') }
+            if defined($new_volname);
+        warn $@ if $@;
+        die $err;
+    }
+
+    return "$storeid:$new_volname";
+}
+
 # ── Resize ──
 
 sub volume_resize {
