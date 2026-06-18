@@ -90,29 +90,28 @@ The plugin implements `volume_snapshot_info` to provide snapshot tree informatio
 
 ## Clones
 
-### Linked Clone
+### Linked Clone (`clone_image`)
 
-- Created when the clone target uses the same storage
-- Uses Thin Image pair: S-VOL shares blocks with P-VOL via copy-on-write
-- Fast creation, space-efficient
-- **Dependency**: S-VOL depends on P-VOL; the source volume cannot be deleted while linked clones exist
-- Parent volume is tracked in the registry
+`clone_image` is PVE's linked-clone primitive and is the only path that runs through
+the plugin. It creates a **CoW Thin Image S-VOL** that shares blocks with its source:
 
-### Full Clone
+- Source must be a **base image** (template) or a **snapshot** — matching
+  `volume_has_feature('clone')` (`base`/`snap`). You cannot linked-clone an arbitrary
+  live volume; use a full copy for that (see below).
+- The Thin Image pair is created **without `autoSplit`**, so the S-VOL stays linked to
+  the P-VOL via copy-on-write — instant and space-efficient (the VVols fast-deploy
+  model). Multiple linked clones can share one base.
+- **Dependency**: the S-VOL shares blocks with the source. The plugin records this
+  (`parent_volname`, plus `parent_snap` when cloned from a snapshot) and **refuses to
+  delete the source — or the source snapshot — while linked clones still depend on
+  it** (clear error listing the dependents). Remove or full-copy the dependents first.
 
-- Created when the clone target uses a different storage or a full copy is requested
-- Creates a new independent LDEV and performs an array-side Thin Image clone (`isClone`) with `autoSplit`, so the copy completes on the array and the result is a fully independent volume
-- Slower but produces a fully independent volume
-- No dependency on the source volume after creation
-- The `copy_speed` parameter (1-15) controls the array-side copy rate; higher values complete faster but consume more array resources
+### Full Clone (handled by PVE core, not `clone_image`)
 
-### Deleting Clones and Their Sources
-
-Linked clones are Thin Image children of their source (P-VOL). The plugin records
-this relationship (`parent_volname`) and **refuses to delete a volume while linked
-clones still depend on it** — attempting to do so fails with a clear error listing
-the dependents. Delete or fully-clone the dependents first, then delete the source.
-Full clones have no such dependency and can be deleted independently.
+A full/independent copy is **not** produced by `clone_image`. PVE core copies the data
+itself via the block-device path (`alloc_image` on the target + `qemu-img convert`
+offline, or drive-mirror online) — the same machinery as "Move Storage". The result is
+an independent volume with no dependency on the source.
 
 ### Clone from Snapshot
 
@@ -120,7 +119,10 @@ Full clones have no such dependency and can be deleted independently.
 qm clone <vmid> <newvmid> --snapname <snapname>
 ```
 
-When cloning from a named snapshot, the plugin uses the S-VOL (snapshot secondary volume) as the clone source instead of the current P-VOL state.
+When cloning from a named snapshot, the CoW pair's P-VOL is the snapshot's S-VOL
+(the point-in-time secondary volume) rather than the source's current state, and the
+clone records `parent_snap` so that snapshot cannot be deleted while the clone exists.
+The optional `copy_speed` (1-15) tunes the array-side copy rate.
 
 ---
 

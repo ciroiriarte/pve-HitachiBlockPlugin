@@ -76,6 +76,17 @@ PVE plugin-contract findings). No features were removed.
 - **`volume_size_info`:** reports size directly from the registry/array for raw
   block volumes (no `qemu-img` shelling).
 - **TLS verification:** opt-in `tls_verify` and `tls_ca_file` storage properties.
+- **True CoW linked clones:** `clone_image` now creates a copy-on-write Thin Image
+  S-VOL (Thin Image pair *without* `autoSplit`) that shares blocks with its source,
+  instead of a full physical copy. Sources are restricted to base images and
+  snapshots (`volume_has_feature('clone')` => `base`/`snap`), matching the block
+  storage model; full copies are handled by PVE core via the device path. Linked
+  clones are space-efficient and instant, and the source/snapshot cannot be deleted
+  while a clone depends on it.
+- **`volume_has_feature` block model:** reworked to the LVM-thin `base`/`current`/`snap`
+  key model so PVE offers linked-clone only where it is valid and exposes `rename`.
+- **`map_volume`/`unmap_volume`:** implemented the PVE 8 explicit map/unmap hooks
+  (delegate to activate/deactivate; return the `/dev/mapper` path).
 - **Management-plane controller redundancy:** `mgmt_ip` now accepts a
   comma-separated list of per-controller REST endpoints (e.g. each VSP controller's
   GUM). The client keeps a sticky current endpoint and, on a transport-level failure,

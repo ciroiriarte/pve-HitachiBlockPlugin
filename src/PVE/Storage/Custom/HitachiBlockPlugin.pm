@@ -563,6 +563,24 @@ sub deactivate_volume {
     return 1;
 }
 
+# Explicit map/unmap hooks (PVE 8+). The volume is backed by a real block device,
+# so mapping = ensure the LUN is mapped to this node and its multipath device is
+# present (activate_volume), and the path is the dm device. Idempotent.
+sub map_volume {
+    my ($class, $storeid, $scfg, $volname, $snapname, $hints) = @_;
+
+    $class->activate_volume($storeid, $scfg, $volname, $snapname);
+    my ($path) = $class->filesystem_path($scfg, $volname, $storeid, $snapname);
+    return $path;
+}
+
+sub unmap_volume {
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+
+    $class->deactivate_volume($storeid, $scfg, $volname, $snapname);
+    return 1;
+}
+
 sub filesystem_path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
@@ -798,17 +816,29 @@ sub volume_snapshot_info {
 sub volume_has_feature {
     my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running) = @_;
 
-    my %features = (
+    # Keyed by the volume's role, following the block-storage (LVM-thin) model:
+    #   base    = a template/base image
+    #   current = a regular live volume
+    #   snap    = operating on a snapshot of the volume
+    # Linked clones are CoW Thin Image S-VOLs, so 'clone' is offered only from a
+    # base image or a snapshot (not an arbitrary live volume); full copies use
+    # 'copy'. Matches PVE::Storage::LvmThinPlugin.
+    my $features = {
         snapshot   => { current => 1 },
-        clone      => { current => 1, snap => 1 },
-        copy       => { current => 1, snap => 1 },
-        sparseinit => { current => 1 },
+        clone      => { base => 1, snap => 1 },
+        copy       => { base => 1, current => 1, snap => 1 },
+        sparseinit => { base => 1, current => 1 },
         template   => { current => 1 },
+        rename     => { current => 1 },
         resize     => { current => 1 },
-    );
+    };
 
-    my $opts = $features{$feature} || return 0;
-    return $snapname ? ($opts->{snap} ? 1 : 0) : ($opts->{current} ? 1 : 0);
+    my $isBase = ($class->parse_volname($volname))[5];
+
+    my $key = $snapname ? 'snap' : ($isBase ? 'base' : 'current');
+
+    return 1 if $features->{$feature} && $features->{$feature}{$key};
+    return undef;
 }
 
 # ── Clone ──
@@ -820,66 +850,58 @@ sub clone_image {
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
+    # clone_image is PVE's LINKED-clone primitive: the result is a CoW Thin Image
+    # S-VOL that shares blocks with its source. Full copies do not come through here
+    # (PVE copies via alloc_image + the device path). The source must therefore be a
+    # base image or a snapshot — matching volume_has_feature('clone') => base/snap.
+    my $isBase = ($class->parse_volname($volname))[5];
+    die "clone_image only supports a base image or a snapshot as the source\n"
+        if !$isBase && !$snap;
+
+    # Use the caller-supplied volname as the registry/dependency key throughout, so
+    # the keys recorded here match exactly what the deletion guards (free_image,
+    # create_base, rename_volume, volume_snapshot_delete) compare against.
     my ($src_ldev_id, $src_meta) = $config->lookup_ldev($volname);
     die "Source volume '$volname' not found\n" unless defined $src_ldev_id;
 
-    # If cloning from a snapshot, resolve the S-VOL as the clone source
+    # The P-VOL of the CoW pair: the snapshot's S-VOL when cloning from a snapshot,
+    # otherwise the (base) volume's own LDEV.
     my $clone_source_ldev = $src_ldev_id;
     if ($snap) {
         my $snap_meta = $config->lookup_snapshot($volname, $snap);
         die "Snapshot '$snap' not found for volume '$volname'\n" unless $snap_meta;
-        if (defined $snap_meta->{svol_ldev_id}) {
-            $clone_source_ldev = $snap_meta->{svol_ldev_id};
-        }
+        die "Snapshot '$snap' has no S-VOL LDEV\n" unless defined $snap_meta->{svol_ldev_id};
+        $clone_source_ldev = $snap_meta->{svol_ldev_id};
     }
 
     my $new_name = $config->reserve_volname($vmid);
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
     my $size_mb = $src_meta->{size_mb} || 1;
-
-    # Determine if linked (thin) or full clone
-    # PVE passes $target as the target storeid for cross-storage clone;
-    # for same-storage, full=0 means linked clone
-    my $is_full = ($target && $target ne $storeid) ? 1 : 0;
-
     my $copy_speed = $scfg->{copy_speed};
+
     my $new_ldev_id;
     my $committed = 0;
 
     eval {
-        if ($is_full) {
-            # Full clone: create new independent LDEV, copy data via array-side clone
-            my $result = $client->create_ldev(
-                pool_id => $scfg->{pool_id},
-                size_mb => $size_mb,
-            );
-            $new_ldev_id = $result->{resourceId}
-                or die "Failed to create target LDEV for full clone\n";
+        # Thin S-VOL to back the linked clone.
+        my $result = $client->create_ldev(
+            pool_id => $snap_pool_id,
+            size_mb => $size_mb,
+        );
+        $new_ldev_id = $result->{resourceId}
+            or die "Failed to create S-VOL for linked clone\n";
 
-            $client->clone_snapshot_to_ldev(
-                pvol_ldev_id   => $clone_source_ldev,
-                svol_ldev_id   => $new_ldev_id,
-                snap_pool_id   => $snap_pool_id,
-                snapshot_group => "pve_clone_${storeid}",
-                ($copy_speed ? (copy_speed => $copy_speed) : ()),
-            );
-        } else {
-            # Linked clone: Thin Image pair (S-VOL shares blocks via CoW)
-            my $result = $client->create_ldev(
-                pool_id => $snap_pool_id,
-                size_mb => $size_mb,
-            );
-            $new_ldev_id = $result->{resourceId}
-                or die "Failed to create S-VOL for linked clone\n";
-
-            $client->clone_snapshot_to_ldev(
-                pvol_ldev_id   => $clone_source_ldev,
-                svol_ldev_id   => $new_ldev_id,
-                snap_pool_id   => $snap_pool_id,
-                snapshot_group => "pve_lclone_${storeid}",
-                ($copy_speed ? (copy_speed => $copy_speed) : ()),
-            );
-        }
+        # Thin Image pair WITHOUT auto-split: the S-VOL stays linked to the P-VOL via
+        # copy-on-write (instant, space-efficient). autoSplit/isClone would instead
+        # produce a full independent copy.
+        $client->create_snapshot(
+            pvol_ldev_id   => $clone_source_ldev,
+            svol_ldev_id   => $new_ldev_id,
+            snap_pool_id   => $snap_pool_id,
+            snapshot_group => "pve_lclone_${storeid}_${new_ldev_id}",
+            auto_split     => 0,
+            ($copy_speed ? (copy_speed => $copy_speed) : ()),
+        );
 
         # Label (prerequisite for orphan detection)
         my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $new_name);
@@ -891,15 +913,14 @@ sub clone_image {
         my $synth = $multipath->ldev_to_wwid($scfg->{storage_id}, $new_ldev_id);
         my ($wwid) = $class->_resolve_wwid($multipath, $new_ldev_id, $synth);
 
-        # Commit to the registry LAST. For linked clones, record the source volume
-        # and (when cloned from a snapshot) the source snapshot, so deletion of
-        # either is refused while this clone still depends on it.
+        # Commit LAST. Record the source volume (and snapshot, when applicable) so the
+        # source cannot be deleted while this linked clone still shares its blocks.
         $config->register_ldev($new_name, $new_ldev_id,
             wwid           => $wwid,
             size_mb        => $size_mb,
-            pool_id        => $is_full ? $scfg->{pool_id} : $snap_pool_id,
-            parent_volname => $is_full ? undef : $volname,
-            parent_snap    => ($is_full || !$snap) ? undef : $snap,
+            pool_id        => $snap_pool_id,
+            parent_volname => $volname,
+            parent_snap    => ($snap ? $snap : undef),
         );
         $committed = 1;
     };

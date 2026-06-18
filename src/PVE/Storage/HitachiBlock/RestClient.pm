@@ -414,12 +414,16 @@ sub create_snapshot {
     croak "pvol_ldev_id is required"   unless defined $opts{pvol_ldev_id};
     croak "snap_pool_id is required"   unless defined $opts{snap_pool_id};
 
+    # autoSplit defaults on (snapshots), but a CoW linked clone must keep the pair
+    # un-split so the S-VOL shares blocks with the P-VOL via copy-on-write.
+    my $auto_split = (exists $opts{auto_split} && !$opts{auto_split}) ? JSON::false : JSON::true;
+
     my $body = {
         snapshotGroupName  => $opts{snapshot_group} || 'pve_snap',
         snapshotPoolId     => int($opts{snap_pool_id}),
         pvolLdevId         => int($opts{pvol_ldev_id}),
         isConsistencyGroup => $opts{is_consistency_group} ? JSON::true : JSON::false,
-        autoSplit          => JSON::true,
+        autoSplit          => $auto_split,
     };
 
     $body->{svolLdevId} = int($opts{svol_ldev_id}) if defined $opts{svol_ldev_id};

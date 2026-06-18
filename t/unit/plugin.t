@@ -139,39 +139,40 @@ subtest 'next_volname_logic' => sub {
 # ── Feature Matrix ──
 
 subtest 'volume_has_feature_logic' => sub {
-    my %features = (
+    # Mirrors volume_has_feature: keyed by base/current/snap (LVM-thin model).
+    my $features = {
         snapshot   => { current => 1 },
-        clone      => { current => 1, snap => 1 },
-        copy       => { current => 1, snap => 1 },
-        sparseinit => { current => 1 },
+        clone      => { base => 1, snap => 1 },
+        copy       => { base => 1, current => 1, snap => 1 },
+        sparseinit => { base => 1, current => 1 },
         template   => { current => 1 },
+        rename     => { current => 1 },
         resize     => { current => 1 },
-    );
-
-    my $check = sub {
-        my ($feature, $snapname) = @_;
-        my $opts = $features{$feature} || return 0;
-        return $snapname ? ($opts->{snap} ? 1 : 0) : ($opts->{current} ? 1 : 0);
     };
 
-    # Current volume features
-    is($check->('snapshot', undef), 1, 'snapshot on current');
-    is($check->('clone', undef), 1, 'clone on current');
-    is($check->('copy', undef), 1, 'copy on current');
-    is($check->('sparseinit', undef), 1, 'sparseinit on current');
-    is($check->('template', undef), 1, 'template on current');
+    my $check = sub {
+        my ($feature, $isBase, $snapname) = @_;
+        my $key = $snapname ? 'snap' : ($isBase ? 'base' : 'current');
+        return ($features->{$feature} && $features->{$feature}{$key}) ? 1 : 0;
+    };
 
-    # Snapshot features
-    is($check->('snapshot', 'snap1'), 0, 'no snapshot of snapshot');
-    is($check->('clone', 'snap1'), 1, 'clone from snapshot');
-    is($check->('copy', 'snap1'), 1, 'copy from snapshot');
+    # Linked clones are CoW: offered only from a base image or a snapshot.
+    is($check->('clone', 0, undef),   0, 'no linked clone of a live volume');
+    is($check->('clone', 1, undef),   1, 'linked clone of a base image');
+    is($check->('clone', 0, 'snap1'), 1, 'linked clone from a snapshot');
 
-    # Resize feature
-    is($check->('resize', undef), 1, 'resize on current');
-    is($check->('resize', 'snap1'), 0, 'no resize of snapshot');
+    is($check->('snapshot', 0, undef),   1, 'snapshot a live volume');
+    is($check->('snapshot', 0, 'snap1'), 0, 'no snapshot of a snapshot');
 
-    # Unknown feature
-    is($check->('unknown', undef), 0, 'unknown feature');
+    is($check->('template', 0, undef), 1, 'template from a live volume');
+    is($check->('rename',   0, undef), 1, 'rename a live volume');
+    is($check->('resize',   0, undef), 1, 'resize a live volume');
+    is($check->('resize', 0, 'snap1'), 0, 'no resize of a snapshot');
+
+    is($check->('copy', 0, undef), 1, 'copy a live volume');
+    is($check->('copy', 1, undef), 1, 'copy a base image');
+
+    is($check->('unknown', 0, undef), 0, 'unknown feature');
 };
 
 # ── Label Format ──

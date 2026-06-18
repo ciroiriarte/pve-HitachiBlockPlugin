@@ -14,6 +14,10 @@ pve-storage-hitachiblock (1.2.0-1) stable; urgency=medium
   * Implemented base/template images (create_base) and volume_size_info
   * Deterministic per-LDEV port selection (replaces resettable round-robin counter)
   * Opt-in TLS verification (tls_verify/tls_ca_file); 429/Retry-After handling
+  * True CoW linked clones (Thin Image without autoSplit; source must be a base
+    image or snapshot); full copies handled by PVE core via the device path
+  * volume_has_feature reworked to the LVM-thin base/current/snap model; exposes rename
+  * Implemented map_volume/unmap_volume (PVE 8 explicit map hooks)
   * Management-plane redundancy: mgmt_ip accepts a comma-separated list of
     per-controller REST endpoints with sticky failover + re-auth (data plane was
     already redundant via multipath over target_ports)

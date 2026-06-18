@@ -205,6 +205,24 @@ subtest 'create_snapshot_with_auto_split' => sub {
     ok($log[0]{body}{autoSplit}, 'auto split enabled');
 };
 
+subtest 'create_snapshot_linked_clone_no_autosplit' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    # A CoW linked clone pairs an explicit S-VOL and must NOT auto-split.
+    $client->create_snapshot(
+        pvol_ldev_id   => 42,
+        snap_pool_id   => 1,
+        svol_ldev_id   => 100,
+        snapshot_group => 'pve_lclone_x',
+        auto_split     => 0,
+    );
+
+    my @log = MockRestClient::get_request_log();
+    ok(!$log[0]{body}{autoSplit}, 'auto_split=0 => autoSplit false (stays CoW-linked)');
+    is($log[0]{body}{svolLdevId}, 100, 'explicit S-VOL in body');
+};
+
 subtest 'restore_snapshot_sends_action' => sub {
     my $client = new_mock_client();
     MockRestClient::set_mock_responses({});
