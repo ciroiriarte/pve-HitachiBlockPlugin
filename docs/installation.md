@@ -129,6 +129,13 @@ pvesm status
 journalctl -u pvedaemon --no-pager | tail -20
 ```
 
+> **Before production use:** this plugin's array- and host-facing behaviour is
+> validated against the API specification, not live hardware. Work through
+> [Hardware Integration Checklist](INTEGRATION_CHECKLIST.md) on your target array
+> (e.g. VSP E590H) — it lists every assumption, how to verify it, and what to change
+> if it is wrong. Treat clone space-efficiency and exact disk sizing as unverified
+> until their checklist items pass.
+
 ## Uninstall
 
 ```bash

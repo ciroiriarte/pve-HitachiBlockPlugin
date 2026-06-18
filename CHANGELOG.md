@@ -126,6 +126,11 @@ PVE plugin-contract findings). No features were removed.
   401 re-auth).
 
 ### Documentation
+- Added `docs/INTEGRATION_CHECKLIST.md`: a phased hardware bring-up checklist (VSP
+  E590H) enumerating every array/host assumption, where it lives in the code, how to
+  verify it, and what to change if wrong — plus a `t/integration/` README tying the
+  test dir to it. Flags clone CoW behavior and disk-size units as the top unverified
+  items.
 - Corrected the multi-attach description (no cluster-wide refcount; per-node host
   groups), the full-clone mechanism, and the replication CLI flags to match the
   actual implementation; documented the new options, commands, and behaviors.
