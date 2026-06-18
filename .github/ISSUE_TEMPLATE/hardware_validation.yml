@@ -1,0 +1,72 @@
+name: Hardware validation report
+description: Report results of running the integration checklist against a real array
+labels: ["hardware-validation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        🙌 **This is the most valuable kind of report right now.** The plugin is developed
+        against the API spec and is not yet confirmed on hardware. Sharing what passed,
+        what differed, and your exact environment helps everyone. Work through
+        [`docs/INTEGRATION_CHECKLIST.md`](https://github.com/ciroiriarte/pve-HitachiBlockPlugin/blob/master/docs/INTEGRATION_CHECKLIST.md)
+        and report below. Lab/test arrays are perfectly fine — say which.
+  - type: input
+    id: array-model
+    attributes:
+      label: Array model and microcode (DKCMAIN / SVOS)
+      placeholder: "VSP E590H, DKCMAIN 93-07-23"
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: input
+    id: pve-version
+    attributes:
+      label: Proxmox VE version
+      placeholder: "pve-manager/8.x.x"
+    validations:
+      required: true
+  - type: dropdown
+    id: env
+    attributes:
+      label: Environment
+      options:
+        - Lab / test array
+        - Production array
+    validations:
+      required: true
+  - type: checkboxes
+    id: phases
+    attributes:
+      label: Checklist phases attempted
+      options:
+        - label: "Phase 0 — API reachability & identity"
+        - label: "Phase 1 — Multi-controller redundancy"
+        - label: "Phase 2 — Provisioning (alloc / size / label)"
+        - label: "Phase 3 — Data path (mapping, multipath, WWID)"
+        - label: "Phase 4 — Snapshots & CoW linked clones"
+        - label: "Phase 5 — Advanced services (QoS, replication, reclaim)"
+        - label: "Phase 6 — PVE integration & migration"
+  - type: textarea
+    id: results
+    attributes:
+      label: Results per item
+      description: For each checklist item attempted, note PASS / FAIL / DEVIATION and any detail. Quote the actual API responses where they differ from what the plugin expects.
+      placeholder: |
+        0.1 base path .......... PASS
+        2.1 byteFormatCapacity .. PASS (1G == 1073741824 bytes)
+        4.2 CoW linked clone .... DEVIATION: split pair S-VOL was ... ; pool usage jumped by ...
+    validations:
+      required: true
+  - type: textarea
+    id: deviations
+    attributes:
+      label: Deviations / fixes needed
+      description: Anything the plugin assumed that did not hold on this model/microcode, and what you changed (if anything) to make it work.
+    validations:
+      required: false

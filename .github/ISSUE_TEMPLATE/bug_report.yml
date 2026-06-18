@@ -1,0 +1,109 @@
+name: Bug report
+description: Report incorrect behaviour of the plugin
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. This plugin is **pre-production and not yet validated on
+        hardware** — environment details (array model, microcode, PVE version) are
+        essential to make a report actionable. Redact credentials and serials as needed.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: What you did, what happened, and what you expected instead.
+      placeholder: |
+        Allocating a disk fails with "...". Expected the LDEV to be created and mapped.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. pvesm alloc myarray 100 '' 10G
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: From version.mk or the installed .deb.
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: input
+    id: pve-version
+    attributes:
+      label: Proxmox VE version
+      description: Output of `pveversion`.
+      placeholder: "pve-manager/8.x.x (running kernel: ...)"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform (storage.cfg `platform`)
+      options:
+        - vsp_one
+        - vsp_e
+        - vsp_g
+        - other / unsure
+    validations:
+      required: true
+  - type: input
+    id: array-model
+    attributes:
+      label: Array model and microcode (DKCMAIN / SVOS)
+      description: e.g. "VSP E590H, DKCMAIN 93-07-23". Critical for array-facing bugs.
+      placeholder: "VSP E590H, microcode ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: api-mode
+    attributes:
+      label: Management API access
+      options:
+        - Embedded / direct to controller GUM (port 443)
+        - Ops Center Configuration Manager server (port 23451)
+        - Single floating VIP
+        - Multiple per-controller endpoints (failover)
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: storage-cfg
+    attributes:
+      label: storage.cfg stanza (redact IPs/serials if sensitive)
+      render: ini
+      placeholder: |
+        hitachiblock: myarray
+            mgmt_ip 10.0.1.100
+            storage_id 8360001XXXXX
+            pool_id 0
+            target_ports CL1-A,CL2-A
+            platform vsp_e
+            ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant `journalctl -u pvedaemon` output, the failing command's output, and `multipath -ll` if it is a data-path issue. Redact as needed.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I redacted credentials (the plugin never logs passwords, but check pasted config/logs).
+          required: true
+        - label: I checked the relevant docs (installation, configuration, operations) and the integration checklist.
+          required: true
+        - label: This is not a security-sensitive issue (those go through SECURITY.md, privately).
+          required: true

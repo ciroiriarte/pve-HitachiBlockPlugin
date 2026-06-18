@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest an enhancement or new capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to do, and what's missing or awkward today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like the plugin to do. If it maps to a specific Hitachi REST API capability, link or name it.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Provisioning / sizing
+        - Snapshots / clones
+        - Multipath / data path
+        - Replication (TC / UR / GAD)
+        - QoS
+        - Migration
+        - Transport (iSCSI / NVMe-oF)
+        - Configuration / CLI
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

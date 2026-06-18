@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ciroiriarte/pve-HitachiBlockPlugin/blob/master/SECURITY.md
+    about: Do NOT open a public issue for security problems — follow the security policy (private disclosure).
+  - name: Documentation
+    url: https://github.com/ciroiriarte/pve-HitachiBlockPlugin/blob/master/docs/README.md
+    about: Read the docs (installation, configuration, operations, and the hardware integration checklist) before filing.
