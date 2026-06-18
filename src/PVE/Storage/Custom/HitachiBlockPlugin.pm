@@ -1440,6 +1440,33 @@ sub create_base {
     return $base_name;
 }
 
+# Reassign a volume to another VMID / name (PVE "Reassign disk", qm disk reassign).
+# Relabels the LDEV on the array and atomically renames the registry entry.
+sub rename_volume {
+    my ($class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname) = @_;
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    my ($ldev_id) = $config->lookup_ldev($source_volname);
+    die "Volume '$source_volname' not found in registry\n" unless defined $ldev_id;
+
+    # Renaming a parent would dangle its linked clones' parent_volname reference.
+    my $deps = $config->find_dependents($source_volname);
+    die "Cannot rename '$source_volname': linked clone(s) depend on it: "
+        . join(', ', sort @$deps) . "\n" if @$deps;
+
+    my $format = ($class->parse_volname($source_volname))[6];
+    $target_volname = $class->find_free_diskname($storeid, $scfg, $target_vmid, $format)
+        if !$target_volname;
+
+    my $client = $class->_client($storeid);
+    my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $target_volname);
+    $client->set_ldev_label($ldev_id, $label);
+
+    $config->rename_volume($source_volname, $target_volname);
+
+    return "${storeid}:${target_volname}";
+}
+
 # ── Manage / Unmanage Volumes (LDEV Import) ──
 
 sub manage_volume {

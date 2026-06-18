@@ -87,14 +87,35 @@ sudo systemctl restart pvedaemon
 
 ## Multipath Configuration
 
-Copy the recommended multipath settings for Hitachi VSP:
+Install `multipath-tools` on every node and copy the recommended device settings
+for Hitachi VSP:
 
 ```bash
+sudo apt-get install -y multipath-tools
 sudo cp conf/multipath.conf.d/hitachiblock-vsp.conf /etc/multipath/conf.d/
 sudo systemctl reload multipathd
 ```
 
-This configures optimal I/O scheduling, path grouping, and failover for Hitachi devices.
+This configures optimal I/O scheduling (ALUA, `group_by_prio`), path grouping, and
+failover for Hitachi `OPEN-V` devices.
+
+### WWID whitelisting (`find_multipaths`)
+
+PVE ships multipath with `find_multipaths strict` by default: only WWIDs listed in
+`/etc/multipath/wwids` are assembled into `/dev/mapper` devices. **The plugin handles
+this automatically** — on map/activate it runs `multipath -a <wwid>` to whitelist the
+LUN before waiting for its device, and `multipath -w <wwid>` on free to drop the
+entry. No manual `multipath -a` per volume is required.
+
+If you prefer not to rely on the per-volume whitelist, you may instead set a broader
+policy in `/etc/multipath.conf` (e.g. `find_multipaths "yes"`, which also multipaths
+any device that has ≥2 paths), but the automatic whitelisting works under the strict
+default and is the recommended path. Verify with:
+
+```bash
+multipath -ll          # should list the 3<wwid> map with all FC paths active
+multipath -v3          # detailed path discovery diagnostics
+```
 
 ## Verify Installation
 

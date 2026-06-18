@@ -46,6 +46,12 @@ PVE plugin-contract findings). No features were removed.
 - **Consistency-group snapshots:** `volume_snapshot_consistency_group` now rolls
   back any pairs it created in the group if a later pair fails, instead of leaving a
   half-built, non-crash-consistent group behind.
+- **Multipath WWID whitelisting (functional):** the plugin now runs `multipath -a
+  <wwid>` when activating a LUN and `multipath -w <wwid>` on free. Under PVE's
+  default `find_multipaths strict`, only whitelisted WWIDs are assembled into
+  `/dev/mapper`, so without this a freshly mapped LUN's device could never appear
+  and `alloc_image`/`activate_volume` would time out. `multipath -r`/`reconfigure`
+  calls are now best-effort (no longer abort the wait loop on transient failure).
 - **Async jobs:** `_wait_for_job` now polls async operations that return only a
   `Location` header (previously treated as already complete).
 - **LDEV allocation race:** `_next_ldev_in_range` now scans all array LDEVs
@@ -70,6 +76,9 @@ PVE plugin-contract findings). No features were removed.
 - **`volume_size_info`:** reports size directly from the registry/array for raw
   block volumes (no `qemu-img` shelling).
 - **TLS verification:** opt-in `tls_verify` and `tls_ca_file` storage properties.
+- **Disk reassignment:** implemented the PVE `rename_volume` method (GUI "Reassign",
+  `qm disk reassign`) — relabels the LDEV and renames the registry entry atomically,
+  refusing when linked clones still depend on the source.
 - **Volume export/import:** implemented `volume_export`/`volume_import` and their
   format helpers (`raw+size`, streamed via `dd` on the block device, like RBD), so
   the storage now participates in PVE's `storage_migrate` path — offline `qm migrate`

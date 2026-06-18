@@ -84,4 +84,31 @@ subtest 'discover_wwid' => sub {
     ok(!defined $res || $res =~ /^60060e80/, 'returns undef or a Hitachi NAA wwid');
 };
 
+subtest 'whitelist_wwid' => sub {
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+
+    eval { $mp->whitelist_wwid() };
+    like($@, qr/wwid is required/, 'requires wwid');
+
+    my @calls;
+    no warnings 'redefine';
+    local *PVE::Storage::HitachiBlock::Multipath::_run_cmd = sub { push @calls, [@_]; return ''; };
+
+    my $dm = $mp->whitelist_wwid('60060e80123456780001000000000000');
+    is($dm, '360060e80123456780001000000000000', 'returns 3-prefixed dm wwid');
+    is_deeply($calls[0], ['multipath', '-a', '360060e80123456780001000000000000'],
+        'runs multipath -a with the 3-prefixed wwid (find_multipaths strict)');
+
+    @calls = ();
+    my $dm2 = $mp->whitelist_wwid('360060e80123456780001000000000000');
+    is($dm2, '360060e80123456780001000000000000', 'already-prefixed wwid is not double-prefixed');
+
+    # Best-effort: a failing `multipath -a` (already present / not yet visible) must
+    # not be fatal — it only warns.
+    local *PVE::Storage::HitachiBlock::Multipath::_run_cmd = sub { die "rc=1\n" };
+    local $SIG{__WARN__} = sub {};
+    my $ok = eval { $mp->whitelist_wwid('60060e80aa'); 1 };
+    ok($ok, 'whitelist_wwid does not die when multipath -a fails');
+};
+
 done_testing();

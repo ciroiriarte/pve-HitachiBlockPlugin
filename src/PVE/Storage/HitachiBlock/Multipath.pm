@@ -94,11 +94,18 @@ sub wait_for_device {
     $timeout //= $self->{timeout};
     my $path = $self->get_device_path($wwid);
 
+    # Whitelist the WWID and (re)assemble the map up front. PVE ships multipath
+    # with `find_multipaths strict` by default, where ONLY WWIDs explicitly listed
+    # in /etc/multipath/wwids are turned into /dev/mapper devices — so without this
+    # the device would never appear, even with all paths present.
+    $self->whitelist_wwid($wwid);
+    eval { _run_cmd('multipath', '-r') };
+
     my $elapsed = 0;
     while ($elapsed < $timeout) {
         if (-e $path) {
             # Ensure multipath has assembled the device
-            _run_cmd('multipathd', 'reconfigure');
+            eval { _run_cmd('multipathd', 'reconfigure') };
             if (-e $path) {
                 return $path;
             }
@@ -108,10 +115,28 @@ sub wait_for_device {
         $elapsed += $POLL_INTERVAL;
 
         # Trigger multipath re-evaluation
-        _run_cmd('multipath', '-r') if $elapsed % 6 == 0;
+        eval { _run_cmd('multipath', '-r') } if $elapsed % 6 == 0;
     }
 
     croak "Device $path did not appear within ${timeout}s";
+}
+
+# Whitelist a device WWID with multipath-tools (append to /etc/multipath/wwids)
+# so it is assembled into a /dev/mapper device even under `find_multipaths strict`.
+# Idempotent and best-effort: `multipath -a` can exit non-zero when the entry
+# already exists or the device is not yet visible, which must not be fatal.
+sub whitelist_wwid {
+    my ($self, $wwid) = @_;
+
+    croak "wwid is required" unless $wwid;
+
+    my $dm_wwid = $wwid;
+    $dm_wwid = "3$wwid" unless $dm_wwid =~ /^3/;
+
+    eval { _run_cmd('multipath', '-a', $dm_wwid) };
+    warn "multipath -a $dm_wwid warning: $@" if $@;
+
+    return $dm_wwid;
 }
 
 sub get_device_path {
@@ -150,6 +175,10 @@ sub remove_device {
 
     # Flush multipath map
     eval { _run_cmd('multipath', '-f', $dm_wwid) };
+
+    # Drop the WWID from /etc/multipath/wwids so the whitelist does not accumulate
+    # stale entries (best-effort: -w is unavailable on older multipath-tools).
+    eval { _run_cmd('multipath', '-w', $dm_wwid) };
 
     # Find and remove underlying SCSI devices
     my @sd_devs = glob("/sys/block/sd*/device/wwid");
