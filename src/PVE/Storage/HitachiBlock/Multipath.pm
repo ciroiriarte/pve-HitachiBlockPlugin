@@ -3,6 +3,7 @@ package PVE::Storage::HitachiBlock::Multipath;
 use strict;
 use warnings;
 
+use POSIX ();
 use Carp qw(croak);
 
 my $RESCAN_TIMEOUT  = 30;
@@ -247,17 +248,81 @@ sub ldev_to_wwid {
     return lc("60060e80${serial_clean}${ldev_hex}0000000000000000");
 }
 
+# Discover the REAL WWID of a just-mapped LDEV by scanning syssfs, rather than
+# trusting the synthesized NAA (whose exact byte layout varies across VSP models).
+# Returns the normalized lowercase WWID (no 'naa.'/'0x' prefix) of a HITACHI
+# device whose page-83 identifier encodes the given LDEV id, or undef if none is
+# found yet. Used as a self-correcting fallback when the synthesized WWID does
+# not resolve to a device.
+sub discover_wwid {
+    my ($self, $ldev_id) = @_;
+
+    croak "ldev_id is required" unless defined $ldev_id;
+    my $ldev_hex = sprintf("%04x", $ldev_id);
+
+    my %seen;
+    my @candidates;
+    for my $wwid_file (glob('/sys/block/sd*/device/wwid')) {
+        my ($sd_name) = $wwid_file =~ m{/sys/block/(sd\w+)/};
+        next unless $sd_name;
+
+        my $wwid = _read_first_line($wwid_file);
+        next unless defined $wwid;
+        $wwid =~ s/^naa\.//i;
+        $wwid =~ s/^0x//i;
+        $wwid = lc($wwid);
+
+        # Hitachi exports NAA-6 identifiers under the IEEE OUI 0x006 0e80.
+        next unless $wwid =~ /^60060e80/;
+
+        my $vendor = _read_first_line("/sys/block/$sd_name/device/vendor") // '';
+        next unless $vendor eq '' || $vendor =~ /HITACHI/i;
+
+        # The LDEV id is encoded within the identifier.
+        next unless $wwid =~ /\Q$ldev_hex\E/;
+
+        push @candidates, $wwid unless $seen{$wwid}++;
+    }
+
+    return $candidates[0];   # undef if nothing matched yet
+}
+
 # ── Internal Helpers ──
+
+sub _read_first_line {
+    my ($file) = @_;
+    open(my $fh, '<', $file) or return undef;
+    my $line = <$fh>;
+    close($fh);
+    return undef unless defined $line;
+    chomp($line);
+    return $line;
+}
 
 sub _run_cmd {
     my (@cmd) = @_;
 
-    my $output = `@cmd 2>&1`;
-    my $rc = $? >> 8;
+    # Execute without a shell (list form) to avoid quoting/injection issues and
+    # to capture combined stdout/stderr reliably.
+    my $pid = open(my $fh, '-|');
+    croak "Cannot fork for '@cmd': $!" unless defined $pid;
 
-    if ($rc != 0) {
-        croak "Command '@cmd' failed (rc=$rc): $output";
+    my $output = '';
+    if ($pid) {
+        local $/;
+        my $data = <$fh>;
+        $output = $data if defined $data;
+        close($fh);
+    } else {
+        open(STDERR, '>&', \*STDOUT);
+        # _exit (not die/exit) avoids running parent destructors if exec fails.
+        { exec { $cmd[0] } @cmd };
+        print "exec '$cmd[0]' failed: $!";
+        POSIX::_exit(127);
     }
+
+    my $rc = $? >> 8;
+    croak "Command '@cmd' failed (rc=$rc): $output" if $rc != 0;
 
     return $output;
 }

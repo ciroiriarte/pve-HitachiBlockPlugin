@@ -1,5 +1,102 @@
 # Changelog
 
+## [1.2.0] - 2026-06-17
+
+Hardening release addressing a multi-model review (correctness, data-safety, and
+PVE plugin-contract findings). No features were removed.
+
+### Fixed
+- **Registry data-loss race (critical):** registry mutations now run under a
+  genuinely cluster-wide lock. On a PVE node (registry on pmxcfs) the lock is the
+  corosync-backed `PVE::Cluster::cfs_lock_storage` (the canonical storage-plugin
+  lock), which serializes the full read-modify-write across nodes; a plain `flock`
+  on a pmxcfs file is only local to one node's kernel and would NOT prevent
+  cross-node lost updates. Off cluster
+  (unit tests / non-pmxcfs paths) it degrades to a local `flock`. The commit itself
+  stays atomic (temp file + fsync + rename), and a corrupt registry is detected and
+  reported instead of being silently treated as empty.
+- **Linked-clone destruction (critical):** `free_image` and `create_base` refuse to
+  delete/convert a volume while linked clones (Thin Image children) depend on it,
+  and `volume_snapshot_delete` now refuses to delete a snapshot while clones created
+  from that snapshot still depend on it — clones record their `parent_snap` so the
+  dependency is tracked.
+- **Registry identity (critical):** a committed `volname` can no longer be silently
+  retargeted to a different LDEV (`register_ldev` rejects the conflict),
+  `manage_volume` refuses to import an LDEV already tracked under another name, and
+  `alloc_image` rejects an explicit name that already exists — preventing two volids
+  from pointing at one LDEV or one volid at the wrong data.
+- **Orphan detection scope (critical):** `list_orphans` now scans every pool the
+  storage uses (data pool, snapshot pool, and any pool referenced by a registry
+  entry) instead of only `pool_id`, so `cleanup_registry_orphans` can no longer
+  unregister live volumes that live in another pool (snapshots, migrated, imported).
+- **Ghost volumes (critical):** `alloc_image`, `clone_image`, and `manage_volume`
+  now treat LUN mapping and device discovery as prerequisites — on failure they
+  roll back array-side resources and the name reservation and fail loudly, and the
+  registry entry is committed last. QoS application remains best-effort.
+- **PVE contract:** `filesystem_path` now returns the volume type (`images`) as its
+  third element instead of the format; `api()` now reports `10` (was `1`) so PVE
+  does not disable the v10-era methods this plugin implements (`rename_volume`,
+  `volume_has_feature`, `volume_snapshot_info`). Reconcile with the deployment's
+  `pve-storage` APIVER/APIAGE before raising it further.
+- **Non-idempotent retries:** the REST client no longer resends `POST`
+  create/map/expand requests on `5xx`/`409` (a lost response could double-create an
+  LDEV/LUN or double-apply an expand). Only `429` (rejected before processing) is
+  retried for `POST`; idempotent `GET`/`PUT`/`DELETE` still retry on `5xx`/`409`.
+  `login()` is now on the same retry path (previously bypassed it entirely).
+- **Consistency-group snapshots:** `volume_snapshot_consistency_group` now rolls
+  back any pairs it created in the group if a later pair fails, instead of leaving a
+  half-built, non-crash-consistent group behind.
+- **Async jobs:** `_wait_for_job` now polls async operations that return only a
+  `Location` header (previously treated as already complete).
+- **LDEV allocation race:** `_next_ldev_in_range` now scans all array LDEVs
+  (storage-wide, not just the configured pool) plus registry/reservations.
+- **status():** pool capacity is now converted from documented MB units instead of
+  guessing MB-vs-bytes by magnitude.
+- **Size parsing:** LDEV size now prefers the exact block count over the
+  human-formatted `byteFormatCapacity` string.
+- **Snapshot lookup:** snapshot group names now encode the volume's LDEV id so the
+  array-side fallback search cannot resolve another volume's pair (legacy names
+  still accepted for upgrade compatibility).
+- **Port scheduler:** replaced the ineffective in-memory round-robin counter (reset
+  every `pvesm` process) with stable per-LDEV deterministic port selection, making
+  map/unmap symmetric across nodes.
+- **Shell safety:** `Multipath` command execution no longer uses a shell
+  (list-form exec), removing quoting/injection exposure.
+
+### Added
+- **Base/template images:** implemented `create_base`, `parse_volname` base-volume
+  syntax, and base-aware name handling — the long-advertised `template` feature now
+  works end to end.
+- **`volume_size_info`:** reports size directly from the registry/array for raw
+  block volumes (no `qemu-img` shelling).
+- **TLS verification:** opt-in `tls_verify` and `tls_ca_file` storage properties.
+- **VSP E series support:** new `vsp_e` platform (e.g. VSP E590H) defaulting to the
+  direct/embedded Configuration Manager REST API on port 443; `storage_id` and
+  `mgmt_ip` descriptions clarified (storageDeviceId vs. serial; embedded GUM vs.
+  dedicated Ops Center CM server).
+- **REST retry hardening:** retries on HTTP 429 and honors `Retry-After`.
+- **Self-correcting WWID:** if the synthesized NAA does not resolve, the plugin
+  discovers and persists the device's real page-83 WWID from sysfs.
+- **Long-storeid labels:** LDEV labels that would exceed the 32-char array limit
+  fall back to a stable hashed prefix, kept consistent with orphan detection.
+- **Replication CLI:** auto-detects connection parameters from `/etc/pve/storage.cfg`
+  (env vars now a fallback), adds an `orphans` command with an `--auto-cleanup` flag
+  that prunes stale registry entries (safe: it scans all array LDEVs, not one pool),
+  and accepts `--volume <volname>` to resolve `--pvol` from the registry.
+- Config: `reserve_volname`, `rename_volume`, `find_dependents`,
+  `find_snapshot_dependents`, `find_volname_by_ldev`, `label_prefix`.
+- Tests: registry concurrency (fork) and corruption, name reservation, rename,
+  dependents, snapshot-dependent and ldev-owner lookups, registry identity conflict,
+  label hashing, base-volume parsing, block-count sizing, deterministic port
+  selection, async `Location` polling, `vsp_e` port default, and the retry matrix
+  (GET retried on 5xx, POST not retried on 5xx, POST retried on 429, login on 429,
+  401 re-auth).
+
+### Documentation
+- Corrected the multi-attach description (no cluster-wide refcount; per-node host
+  groups), the full-clone mechanism, and the replication CLI flags to match the
+  actual implementation; documented the new options, commands, and behaviors.
+
 ## [1.1.0] - 2026-03-07
 
 ### Added

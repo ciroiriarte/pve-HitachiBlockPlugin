@@ -1,3 +1,26 @@
+pve-storage-hitachiblock (1.2.0-1) stable; urgency=medium
+
+  * Hardening release from a multi-model review (no features removed)
+  * Cluster-wide registry lock via corosync-backed cfs_lock_storage (true cross-node
+    serialization; plain flock on pmxcfs is only node-local), atomic commit
+  * Refuse deletion of volumes/snapshots with dependent linked clones (data-safety)
+  * Enforce volname<->ldev identity (no silent retarget / double-import / dup volid)
+  * Orphan scan covers all pools so cleanup cannot unregister live volumes
+  * alloc/clone/manage now fail loudly with rollback instead of leaving ghost volumes
+  * filesystem_path returns the volume type per the PVE contract; api() now reports 10
+  * POST create/map/expand no longer retried on 5xx/409 (only 429); login retries too
+  * Consistency-group snapshots roll back partial pairs on failure
+  * Async jobs returning only a Location header are now polled
+  * Implemented base/template images (create_base) and volume_size_info
+  * Deterministic per-LDEV port selection (replaces resettable round-robin counter)
+  * Opt-in TLS verification (tls_verify/tls_ca_file); 429/Retry-After handling
+  * VSP E series (e.g. E590H) support via new vsp_e platform (embedded REST, port 443)
+  * Self-correcting WWID discovery from sysfs; long-storeid label hashing
+  * Replication CLI reads storage.cfg, adds orphans (with --auto-cleanup) and --volume
+  * Shell-free command execution in Multipath
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Tue, 17 Jun 2026 00:00:00 +0000
+
 pve-storage-hitachiblock (1.1.0-1) stable; urgency=medium
 
   * Manage/unmanage volumes (LDEV import and release)

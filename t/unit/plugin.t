@@ -32,6 +32,57 @@ subtest 'parse_volname_invalid' => sub {
     ok($volname !~ /^vm-(\d+)-disk-(\d+)$/, 'invalid name does not match');
 };
 
+subtest 'parse_volname_base' => sub {
+    # Base (template) volume parsing — added with create_base support.
+    my $parse = sub {
+        my ($v) = @_;
+        return ('images', $v, $1, undef, undef, 1, 'raw')
+            if $v =~ /^base-(\d+)-disk-(\d+)$/;
+        return ('images', $v, $1, undef, undef, undef, 'raw')
+            if $v =~ /^vm-(\d+)-disk-(\d+)$/;
+        return;
+    };
+
+    my @base = $parse->('base-100-disk-1');
+    is($base[2], 100, 'base vmid extracted');
+    is($base[5], 1, 'base isBase flag set');
+
+    my @vm = $parse->('vm-100-disk-1');
+    is($vm[2], 100, 'vm vmid extracted');
+    is($vm[5], undef, 'vm isBase flag unset');
+
+    # vmid_from_volname accepts both prefixes.
+    my $vmid_from = sub { ($_[0] =~ /^(?:vm|base)-(\d+)-/) ? $1 : 0 };
+    is($vmid_from->('base-200-disk-3'), 200, 'vmid from base name');
+    is($vmid_from->('vm-300-disk-1'), 300, 'vmid from vm name');
+};
+
+subtest 'ldev_size_mb_logic' => sub {
+    # Mirrors _ldev_size_mb: prefer exact block count over formatted string.
+    my $size = sub {
+        my ($ldev) = @_;
+        for my $f (qw(blockCapacity numOfBlocks)) {
+            return int($ldev->{$f} * 512 / (1024 * 1024))
+                if defined $ldev->{$f} && $ldev->{$f} =~ /^\d+$/;
+        }
+        my $cap = $ldev->{byteFormatCapacity};
+        if (defined $cap) {
+            return int($1 * 1024 * 1024) if $cap =~ /^([\d.]+)\s*T/i;
+            return int($1 * 1024)        if $cap =~ /^([\d.]+)\s*G/i;
+            return int($1)               if $cap =~ /^([\d.]+)\s*M/i;
+        }
+        return 0;
+    };
+
+    is($size->({ blockCapacity => 2097152 }), 1024, '2097152 blocks = 1024 MB');
+    is($size->({ byteFormatCapacity => '1.00 G' }), 1024, '1G string = 1024 MB');
+    is($size->({ byteFormatCapacity => '2.00 T' }), 2097152, '2T string = 2097152 MB');
+    is($size->({ byteFormatCapacity => '512.00 M' }), 512, '512M string = 512 MB');
+    # Block count takes precedence over the formatted string when both present.
+    is($size->({ blockCapacity => 2097152, byteFormatCapacity => '999.00 G' }), 1024,
+       'block count wins over byteFormatCapacity');
+};
+
 subtest 'vmid_from_volname' => sub {
     my $extract = sub {
         my ($v) = @_;
@@ -167,27 +218,26 @@ subtest 'ldev_range_parsing' => sub {
 
 # ── Port Scheduler Logic ──
 
-subtest 'port_scheduler_round_robin' => sub {
+subtest 'port_scheduler_deterministic_by_ldev' => sub {
+    # Mirrors _select_ports: a given LDEV always maps to the same two ports
+    # (stable across processes/nodes), giving multipath redundancy without an
+    # in-memory counter that resets every pvesm invocation.
     my @all_ports = ('CL1-A', 'CL2-A', 'CL3-A', 'CL4-A');
-    my %counters;
 
     my $select = sub {
-        my ($storeid) = @_;
-        my $idx = ($counters{$storeid} || 0) % scalar(@all_ports);
-        my $next_idx = ($idx + 1) % scalar(@all_ports);
-        my @selected = ($all_ports[$idx], $all_ports[$next_idx]);
-        $counters{$storeid} = $next_idx + 1;
-        return @selected;
+        my ($ldev_id) = @_;
+        my $n = scalar(@all_ports);
+        my $idx = defined $ldev_id ? ($ldev_id % $n) : 0;
+        my $next = ($idx + 1) % $n;
+        return ($all_ports[$idx], $all_ports[$next]);
     };
 
-    my @p1 = $select->('test');
-    is_deeply(\@p1, ['CL1-A', 'CL2-A'], 'first selection: ports 0,1');
+    is_deeply([$select->(0)], ['CL1-A', 'CL2-A'], 'ldev 0 -> ports 0,1');
+    is_deeply([$select->(1)], ['CL2-A', 'CL3-A'], 'ldev 1 -> ports 1,2');
+    is_deeply([$select->(3)], ['CL4-A', 'CL1-A'], 'ldev 3 -> ports 3,0 (wraps)');
 
-    my @p2 = $select->('test');
-    is_deeply(\@p2, ['CL3-A', 'CL4-A'], 'second selection: ports 2,3');
-
-    my @p3 = $select->('test');
-    is_deeply(\@p3, ['CL1-A', 'CL2-A'], 'wraps around: ports 0,1 again');
+    # Same LDEV is stable across repeated calls (map/unmap symmetry).
+    is_deeply([$select->(42)], [$select->(42)], 'selection is stable per LDEV');
 };
 
 # ── Manage/Unmanage Volume Name Logic ──

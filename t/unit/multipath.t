@@ -72,4 +72,16 @@ subtest 'get_device_size_requires_path' => sub {
     like($@, qr/path is required/, 'get_device_size requires path');
 };
 
+subtest 'discover_wwid' => sub {
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+
+    eval { $mp->discover_wwid() };
+    like($@, qr/ldev_id is required/, 'discover_wwid requires ldev_id');
+
+    # On a host with no matching Hitachi device this returns undef rather than
+    # dying — the caller then falls back to the synthesized WWID.
+    my $res = $mp->discover_wwid(99999);
+    ok(!defined $res || $res =~ /^60060e80/, 'returns undef or a Hitachi NAA wwid');
+};
+
 done_testing();

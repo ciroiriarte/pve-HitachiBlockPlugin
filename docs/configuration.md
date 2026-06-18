@@ -7,12 +7,12 @@ Add to `/etc/pve/storage.cfg`:
 ```
 hitachiblock: <storeid>
     mgmt_ip <ip_or_hostname>
-    storage_id <serial_number>
+    storage_id <storage_device_id>
     pool_id <dp_pool_id>
     snap_pool_id <snapshot_pool_id>
     target_ports <port1>,<port2>
     host_mode LINUX/IRIX
-    platform <vsp_g|vsp_one>
+    platform <vsp_g|vsp_e|vsp_one>
     shared 1
     content images
     nodes <node1>,<node2>
@@ -50,8 +50,8 @@ hitachiblock: myarray
 
 | Parameter | Description |
 |-----------|-------------|
-| `mgmt_ip` | Management IP or hostname of the Configuration Manager REST API endpoint |
-| `storage_id` | Storage system serial number (e.g., `836000123456`) |
+| `mgmt_ip` | Management IP/hostname of the Configuration Manager REST API endpoint — the array's embedded/GUM controller (direct connection) or a dedicated Ops Center Configuration Manager server |
+| `storage_id` | Storage device ID (`storageDeviceId`), e.g. the 12-digit model+serial id returned by `GET /v1/objects/storages` (e.g., `836000123456`) — not the bare serial number |
 | `pool_id` | DP pool ID for LDEV allocation (numeric) |
 | `target_ports` | Comma-separated FC port IDs for LUN mapping (e.g., `CL1-A,CL2-A`) |
 
@@ -61,8 +61,8 @@ hitachiblock: myarray
 |-----------|---------|-------------|
 | `snap_pool_id` | Same as `pool_id` | Separate DP pool for snapshot S-VOLs |
 | `host_mode` | `LINUX/IRIX` | Host mode for auto-created host groups |
-| `platform` | `vsp_one` | Platform type: `vsp_g` or `vsp_one`. Controls default API port. |
-| `mgmt_port` | Auto-detected | API port override. Auto: 443 for `vsp_one`, 23451 for `vsp_g`. |
+| `platform` | `vsp_one` | Platform type: `vsp_g`, `vsp_e`, or `vsp_one`. Controls default API port. Use `vsp_e` for VSP E series (e.g. E590H) talking to the embedded/direct REST API. |
+| `mgmt_port` | Auto-detected | API port override. Auto: 443 for `vsp_one`/`vsp_e` (direct/embedded REST), 23451 for `vsp_g` (Ops Center CM server). |
 | `qos_upper_iops` | None | Maximum IOPS limit applied to every new LDEV |
 | `qos_upper_mbps` | None | Maximum throughput (MB/s) limit applied to every new LDEV |
 | `qos_lower_iops` | None | Minimum guaranteed IOPS per LDEV (lower bound, min 0) |
@@ -70,9 +70,11 @@ hitachiblock: myarray
 | `qos_priority` | None | QoS priority level: `1` = high, `2` = medium, `3` = low |
 | `ldev_range` | None | Restrict LDEV allocation to a numeric range (e.g., `1000-1999` or `0x3E8-0x7CF`) |
 | `discard_zero_page` | `0` | When enabled (`1`), reclaims zero pages on `deactivate_volume` |
-| `port_scheduler` | `0` | When enabled (`1`), uses round-robin port selection for LUN mapping |
+| `port_scheduler` | `0` | When enabled (`1`) and more than two `target_ports` are configured, each volume is mapped to a stable pair of ports chosen deterministically from its LDEV ID, spreading volumes across FC ports while preserving multipath redundancy |
 | `copy_speed` | None | Array-side copy speed for clone/migration operations (integer, 1-15) |
 | `group_delete` | `0` | When enabled (`1`), automatically deletes empty host groups on deactivate |
+| `tls_verify` | `0` | When enabled (`1`), verifies the Configuration Manager TLS certificate. Off by default for the appliance's self-signed cert. |
+| `tls_ca_file` | None | Path to a CA bundle used to verify the API certificate when `tls_verify` is enabled |
 
 ### Standard PVE Parameters
 
@@ -92,23 +94,42 @@ Set credentials via the PVE storage manager (they are configured during `on_add_
 pvesm set <storeid> --username <api_user> --password <api_password>
 ```
 
-The credential file format is:
+The credential file is JSON, mode `0600`, readable only by root:
 
+```json
+{"username":"<api_user>","password":"<api_password>"}
 ```
-username=<api_user>
-password=<api_password>
-```
+
+### Storage ID length and LDEV labels
+
+The plugin tags each LDEV with a label of the form `pve:<storeid>:<volname>`.
+Hitachi LDEV labels are limited to 32 characters on most VSP models. When a
+`<storeid>` is long enough that this would overflow, the plugin automatically
+substitutes a stable 8-character hash of the storeid (`pve:<hash>:<volname>`) so
+labels stay within the limit and remain consistently matchable by orphan
+detection. Volume identity is always authoritative in the registry, not the
+label, so this substitution is transparent.
 
 ## Platform Differences
 
-| Aspect | VSP G series | VSP One Block |
-|--------|-------------|---------------|
-| API Provider | Ops Center API Configuration Manager (external appliance or SVP) | Built-in REST API (native to controller) |
-| Default Port | 23451 | 443 |
-| API Endpoints | Identical | Identical |
-| LDEV/Pool/Snapshot/QoS/Replication ops | Identical | Identical |
+| Aspect | VSP G series (`vsp_g`) | VSP E series (`vsp_e`) | VSP One Block (`vsp_one`) |
+|--------|------------------------|------------------------|---------------------------|
+| API Provider | Ops Center API Configuration Manager (external appliance or SVP) | Embedded Configuration Manager REST API on the controller (GUM), direct connection | Built-in REST API (native to controller) |
+| Default Port | 23451 | 443 | 443 |
+| API Endpoints | Identical (`/ConfigurationManager/v1/objects/storages/<storageDeviceId>/…`) | Identical | Identical |
+| LDEV/Pool/Snapshot/QoS/Replication ops | Identical | Identical | Identical |
 
-The plugin uses a single code path for both platforms. The only difference is the management endpoint (IP + port).
+The plugin uses a single code path for all platforms. The only difference is the
+management endpoint (IP + port). All three speak the standard Ops Center
+Configuration Manager REST API object model.
+
+> **VSP E series (e.g. E590H) note:** the E series exposes this same Configuration
+> Manager REST API both via a dedicated Ops Center CM server (port 23451 — use
+> `platform vsp_g` or set `mgmt_port`) and directly/embedded on the controller GUM
+> (port 443 — `platform vsp_e`). It *also* offers a separate, simplified "Storage
+> Advisor Embedded" REST API (`/ConfigurationManager/simple/v1/…`, volumes/servers
+> model) which this plugin does **not** use. Confirm that QoS, Thin Image, and
+> remote replication are enabled on the array's microcode before relying on them.
 
 ## QoS Configuration
 

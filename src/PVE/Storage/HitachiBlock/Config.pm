@@ -7,14 +7,26 @@ use JSON qw(encode_json decode_json);
 use File::Path qw(make_path);
 use File::Basename qw(dirname);
 use Fcntl qw(:flock);
+use IO::Handle;
+use Digest::MD5 qw(md5_hex);
 use Carp qw(croak);
+
+# Hitachi LDEV labels are limited to 32 characters on most VSP models.
+my $MAX_LABEL_LEN = 32;
 
 my $CREDS_DIR    = '/etc/pve/priv/hitachiblock';
 my $REGISTRY_DIR = '/etc/pve/priv/hitachiblock';
 
-# Platform defaults
+# Seconds to wait for the cluster registry lock before giving up.
+my $REGISTRY_LOCK_TIMEOUT = 10;
+
+# Platform defaults. Ports reflect the documented Configuration Manager REST API
+# endpoints: 443 for the array's embedded/direct REST server (VSP One and the
+# VSP E/G midrange GUM), 23451 for a dedicated Ops Center Configuration Manager
+# server fronting the array.
 my %PLATFORM_DEFAULTS = (
     vsp_g   => { port => 23451 },
+    vsp_e   => { port => 443 },
     vsp_one => { port => 443 },
 );
 
@@ -77,6 +89,124 @@ sub delete_credentials {
 # ── LDEV Registry ──
 # Maps volname -> ldev_id for quick lookup without querying the array
 
+sub _read_registry_unlocked {
+    my ($self) = @_;
+
+    my $file = $self->_registry_file();
+    return {} unless -f $file;
+
+    open(my $fh, '<', $file) or croak "Cannot read registry $file: $!";
+    local $/;
+    my $content = <$fh>;
+    close($fh);
+
+    return {} unless $content && length($content) > 0;
+
+    my $data = eval { decode_json($content) };
+    croak "Registry $file is corrupt: $@" if $@;
+    return $data;
+}
+
+sub _write_registry_atomic {
+    my ($self, $registry) = @_;
+
+    my $file = $self->_registry_file();
+    my $dir = dirname($file);
+    make_path($dir) unless -d $dir;
+
+    # Write to a temp file, fsync, then atomically rename into place so a crash
+    # mid-write can never truncate or corrupt the live registry.
+    my $tmp = "$file.tmp.$$";
+    open(my $fh, '>', $tmp) or croak "Cannot write registry $tmp: $!";
+    print $fh encode_json($registry);
+    $fh->flush;
+    eval { $fh->sync };   # best-effort fsync
+    close($fh);
+
+    unless (rename($tmp, $file)) {
+        my $err = $!;
+        unlink($tmp);
+        croak "Cannot commit registry $file: $err";
+    }
+
+    return 1;
+}
+
+# Run $code under an exclusive, cluster-wide lock with a freshly-loaded registry.
+# $code receives the registry hashref, mutates it in place, and may return a value.
+# The lock spans the entire read-modify-write so concurrent operations cannot lose
+# updates. On a real PVE node the registry lives on pmxcfs and the lock is the
+# corosync-backed PVE::Cluster::cfs_lock_file, which DOES serialize across nodes
+# (a plain flock on a pmxcfs file would only be local to one node's kernel). Off
+# cluster (unit tests / non-pmxcfs paths) it degrades to a local flock.
+sub _with_registry_lock {
+    my ($self, $code) = @_;
+
+    croak "code must be a coderef" unless ref $code eq 'CODE';
+
+    my $critical = sub {
+        my $registry = $self->_read_registry_unlocked();
+        my @result = $code->($registry);
+        $self->_write_registry_atomic($registry);
+        return [@result];
+    };
+
+    my $res = $self->_run_locked($critical);
+    return wantarray ? @$res : $res->[0];
+}
+
+# Acquire the registry mutex (cluster-wide where possible) and run $critical,
+# returning its (arrayref) result. Used by every read-modify-write helper.
+sub _run_locked {
+    my ($self, $critical) = @_;
+
+    if ($self->_use_cluster_lock()) {
+        # cfs_lock_storage builds the corosync lock id "storage-<storeid>" and runs
+        # $critical under it. (cfs_lock_file must NOT be used here — its first arg
+        # has to be a pmxcfs-registered config file, so it would die "unknown file".)
+        # On in-code failure it sets $@ and returns undef; on success it returns the
+        # coderef's value (our arrayref).
+        my $res = PVE::Cluster::cfs_lock_storage(
+            $self->{storeid}, $REGISTRY_LOCK_TIMEOUT, $critical);
+        croak "Cannot acquire cluster registry lock: $@" if $@;
+        return $res;
+    }
+
+    my $lockfile = $self->_lock_file();
+    my $dir = dirname($lockfile);
+    make_path($dir) unless -d $dir;
+
+    open(my $lock_fh, '>', $lockfile)
+        or croak "Cannot open registry lock $lockfile: $!";
+    flock($lock_fh, LOCK_EX)
+        or croak "Cannot acquire registry lock $lockfile: $!";
+
+    my $res;
+    my $ok = eval { $res = $critical->(); 1 };
+    my $err = $@;
+    close($lock_fh);   # releases the lock
+    croak $err unless $ok;
+
+    return $res;
+}
+
+# True when the registry is backed by pmxcfs and PVE::Cluster is loadable, so we
+# can use the corosync-coordinated cluster lock. Cached after first probe. Unit
+# tests redirect the registry to a tempdir, so they always take the flock path.
+my $CLUSTER_LOCK_OK;
+sub _use_cluster_lock {
+    my ($self) = @_;
+
+    return 0 unless $self->_registry_file() =~ m{^/etc/pve/};
+
+    return $CLUSTER_LOCK_OK if defined $CLUSTER_LOCK_OK;
+    $CLUSTER_LOCK_OK = eval {
+        require PVE::Cluster;
+        PVE::Cluster->can('cfs_lock_storage') ? 1 : 0;
+    } || 0;
+    return $CLUSTER_LOCK_OK;
+}
+
 sub load_registry {
     my ($self) = @_;
 
@@ -90,7 +220,9 @@ sub load_registry {
     close($fh);
 
     return {} unless $content && length($content) > 0;
-    return decode_json($content);
+    my $data = eval { decode_json($content) };
+    croak "Registry $file is corrupt: $@" if $@;
+    return $data;
 }
 
 sub save_registry {
@@ -98,14 +230,10 @@ sub save_registry {
 
     croak "registry must be a hashref" unless ref $registry eq 'HASH';
 
-    my $file = $self->_registry_file();
-    my $dir = dirname($file);
-    make_path($dir) unless -d $dir;
-
-    open(my $fh, '>', $file) or croak "Cannot write registry $file: $!";
-    flock($fh, LOCK_EX);
-    print $fh encode_json($registry);
-    close($fh);
+    $self->_run_locked(sub {
+        $self->_write_registry_atomic($registry);
+        return [1];
+    });
 
     return 1;
 }
@@ -116,14 +244,43 @@ sub register_ldev {
     croak "volname is required"  unless $volname;
     croak "ldev_id is required"  unless defined $ldev_id;
 
-    my $registry = $self->load_registry();
-    $registry->{$volname} = {
-        ldev_id => int($ldev_id),
-        %meta,
-    };
-    $self->save_registry($registry);
+    $self->_with_registry_lock(sub {
+        my ($reg) = @_;
+        my $existing = (ref $reg->{$volname} eq 'HASH') ? $reg->{$volname} : {};
+        # Enforce a stable volname <-> ldev_id identity: a committed entry must
+        # never be silently retargeted to a different LDEV (that would orphan the
+        # old one and point the volid at the wrong data). Re-registering the same
+        # ldev_id (resize, pool change) is fine.
+        if (defined $existing->{ldev_id} && !$existing->{reserved}
+            && int($existing->{ldev_id}) != int($ldev_id)) {
+            croak "Registry conflict: '$volname' already maps to LDEV "
+                . "$existing->{ldev_id}; refusing to retarget to $ldev_id";
+        }
+        # Merge over any existing entry (preserves snapshots / parent links unless
+        # overridden) and clear the reservation marker now that the LDEV is real.
+        my %entry = (%$existing, ldev_id => int($ldev_id), %meta);
+        delete $entry{reserved};
+        $reg->{$volname} = \%entry;
+        return;
+    });
 
     return 1;
+}
+
+# Return the volname currently mapped to $ldev_id, or undef. Used to reject
+# importing/managing an LDEV that is already tracked under another name.
+sub find_volname_by_ldev {
+    my ($self, $ldev_id) = @_;
+
+    croak "ldev_id is required" unless defined $ldev_id;
+
+    my $reg = $self->load_registry();
+    for my $name (keys %$reg) {
+        my $e = $reg->{$name};
+        next unless ref $e eq 'HASH' && defined $e->{ldev_id};
+        return $name if int($e->{ldev_id}) == int($ldev_id);
+    }
+    return undef;
 }
 
 sub unregister_ldev {
@@ -131,11 +288,93 @@ sub unregister_ldev {
 
     croak "volname is required" unless $volname;
 
-    my $registry = $self->load_registry();
-    delete $registry->{$volname};
-    $self->save_registry($registry);
+    $self->_with_registry_lock(sub {
+        my ($reg) = @_;
+        delete $reg->{$volname};
+        return;
+    });
 
     return 1;
+}
+
+# Atomically reserve the next free volume name for a VMID and insert a placeholder
+# entry so concurrent allocations (same or other node) cannot pick the same name.
+# Pass base => 1 to reserve a base-volume name. The reservation is finalized by a
+# later register_ldev() or released by unregister_ldev() on failure.
+sub reserve_volname {
+    my ($self, $vmid, %opts) = @_;
+
+    croak "vmid is required" unless defined $vmid;
+    my $prefix = $opts{base} ? 'base' : 'vm';
+
+    return $self->_with_registry_lock(sub {
+        my ($reg) = @_;
+        my $max = 0;
+        for my $name (keys %$reg) {
+            if ($name =~ /^(?:vm|base)-${vmid}-disk-(\d+)$/) {
+                $max = $1 if $1 > $max;
+            }
+        }
+        my $name = "${prefix}-${vmid}-disk-" . ($max + 1);
+        $reg->{$name} = { reserved => 1, timestamp => time() };
+        return $name;
+    });
+}
+
+# Atomically rename a registry entry (used by create_base: vm-... -> base-...).
+sub rename_volume {
+    my ($self, $old_volname, $new_volname) = @_;
+
+    croak "old_volname is required" unless $old_volname;
+    croak "new_volname is required" unless $new_volname;
+
+    $self->_with_registry_lock(sub {
+        my ($reg) = @_;
+        croak "Volume '$old_volname' not in registry" unless $reg->{$old_volname};
+        croak "Volume '$new_volname' already exists"   if $reg->{$new_volname};
+        $reg->{$new_volname} = delete $reg->{$old_volname};
+        return;
+    });
+
+    return 1;
+}
+
+# Return an arrayref of volnames that list $volname as their parent (linked clones).
+sub find_dependents {
+    my ($self, $volname) = @_;
+
+    my $reg = $self->load_registry();
+    my @deps;
+    for my $name (keys %$reg) {
+        next if $name eq $volname;
+        my $entry = $reg->{$name};
+        next unless ref $entry eq 'HASH';
+        push @deps, $name if defined $entry->{parent_volname}
+            && $entry->{parent_volname} eq $volname;
+    }
+    return \@deps;
+}
+
+# Return an arrayref of volnames that were cloned from a specific snapshot of
+# $volname (they record parent_volname + parent_snap). Used to refuse deletion
+# of a snapshot whose S-VOL still backs linked clones.
+sub find_snapshot_dependents {
+    my ($self, $volname, $snapname) = @_;
+
+    croak "volname is required"  unless $volname;
+    croak "snapname is required" unless $snapname;
+
+    my $reg = $self->load_registry();
+    my @deps;
+    for my $name (keys %$reg) {
+        next if $name eq $volname;
+        my $entry = $reg->{$name};
+        next unless ref $entry eq 'HASH';
+        push @deps, $name
+            if defined $entry->{parent_volname} && $entry->{parent_volname} eq $volname
+            && defined $entry->{parent_snap}    && $entry->{parent_snap}    eq $snapname;
+    }
+    return \@deps;
 }
 
 sub lookup_ldev {
@@ -163,15 +402,17 @@ sub register_snapshot {
     croak "volname is required"  unless $volname;
     croak "snapname is required" unless $snapname;
 
-    my $registry = $self->load_registry();
-    croak "Volume '$volname' not in registry" unless $registry->{$volname};
+    $self->_with_registry_lock(sub {
+        my ($reg) = @_;
+        croak "Volume '$volname' not in registry" unless $reg->{$volname};
 
-    $registry->{$volname}{snapshots} //= {};
-    $registry->{$volname}{snapshots}{$snapname} = {
-        timestamp => time(),
-        %meta,
-    };
-    $self->save_registry($registry);
+        $reg->{$volname}{snapshots} //= {};
+        $reg->{$volname}{snapshots}{$snapname} = {
+            timestamp => time(),
+            %meta,
+        };
+        return;
+    });
 
     return 1;
 }
@@ -182,14 +423,16 @@ sub unregister_snapshot {
     croak "volname is required"  unless $volname;
     croak "snapname is required" unless $snapname;
 
-    my $registry = $self->load_registry();
-    if ($registry->{$volname} && $registry->{$volname}{snapshots}) {
-        delete $registry->{$volname}{snapshots}{$snapname};
-        # Clean up empty snapshots hash
-        delete $registry->{$volname}{snapshots}
-            unless %{$registry->{$volname}{snapshots}};
-    }
-    $self->save_registry($registry);
+    $self->_with_registry_lock(sub {
+        my ($reg) = @_;
+        if ($reg->{$volname} && $reg->{$volname}{snapshots}) {
+            delete $reg->{$volname}{snapshots}{$snapname};
+            # Clean up empty snapshots hash
+            delete $reg->{$volname}{snapshots}
+                unless %{$reg->{$volname}{snapshots}};
+        }
+        return;
+    });
 
     return 1;
 }
@@ -260,9 +503,28 @@ sub validate_config {
 
 # ── Volume Name Helpers ──
 
+# The label prefix used to tag and discover LDEVs owned by a given storage.
+# When "pve:<storeid>:" plus a typical volname would exceed the array's 32-char
+# label limit, the storeid is replaced by a stable 8-char hash so labels stay
+# unique, within bounds, and consistently matchable by orphan detection.
+sub label_prefix {
+    my ($class, $storeid) = @_;
+
+    my $full = "pve:${storeid}:";
+    # Reserve room for the volume name (e.g. "vm-999999999-disk-99" ~ 20 chars).
+    return $full if length($full) + 20 <= $MAX_LABEL_LEN;
+
+    my $hash = substr(md5_hex($storeid), 0, 8);
+    return "pve:${hash}:";
+}
+
 sub make_label {
     my ($class, $storeid, $volname) = @_;
-    return "pve:${storeid}:${volname}";
+
+    my $label = $class->label_prefix($storeid) . $volname;
+    # Final safety clamp; volnames are short so this is effectively never hit.
+    $label = substr($label, 0, $MAX_LABEL_LEN) if length($label) > $MAX_LABEL_LEN;
+    return $label;
 }
 
 sub parse_label {
@@ -287,6 +549,11 @@ sub _creds_file {
 sub _registry_file {
     my ($self) = @_;
     return "$REGISTRY_DIR/$self->{storeid}.json";
+}
+
+sub _lock_file {
+    my ($self) = @_;
+    return $self->_registry_file() . '.lock';
 }
 
 1;

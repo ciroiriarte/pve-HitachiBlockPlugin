@@ -26,9 +26,19 @@ sub new {
     my $port = $opts{port} || 443;
     my $base = "https://$opts{mgmt_ip}:$port/ConfigurationManager/v1/objects/storages/$opts{storage_id}";
 
+    # TLS verification is opt-in: Configuration Manager ships a self-signed cert by
+    # default, so verification is disabled unless the caller explicitly enables it
+    # (optionally pinning a CA bundle).
+    my %ssl_opts = ( verify_hostname => 0, SSL_verify_mode => 0 );
+    if ($opts{tls_verify}) {
+        $ssl_opts{verify_hostname} = 1;
+        $ssl_opts{SSL_verify_mode} = 0x01;   # SSL_VERIFY_PEER
+        $ssl_opts{SSL_ca_file}     = $opts{tls_ca_file} if $opts{tls_ca_file};
+    }
+
     my $ua = LWP::UserAgent->new(
         timeout  => $opts{timeout} || $DEFAULT_TIMEOUT,
-        ssl_opts => { verify_hostname => 0, SSL_verify_mode => 0 },
+        ssl_opts => \%ssl_opts,
     );
 
     my $self = bless {
@@ -52,23 +62,41 @@ sub login {
     my ($self) = @_;
 
     my $url = "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/sessions";
-    my $req = HTTP::Request->new('POST', $url);
-    $req->header('Content-Type'  => 'application/json');
-    $req->header('Accept'        => 'application/json');
-    $req->authorization_basic($self->{username}, $self->{password});
-    $req->content(encode_json({}));
 
-    my $res = $self->{ua}->request($req);
+    # Session creation is on the critical path for activate_storage/on_add_hook, so
+    # it gets the same transient-error handling as _request: retry on rate limits
+    # (429) and 5xx, honoring Retry-After. These codes mean the request was not
+    # processed, so retrying cannot create duplicate sessions.
+    my $retries = 0;
+    while (1) {
+        my $req = HTTP::Request->new('POST', $url);
+        $req->header('Content-Type'  => 'application/json');
+        $req->header('Accept'        => 'application/json');
+        $req->authorization_basic($self->{username}, $self->{password});
+        $req->content(encode_json({}));
 
-    if (!$res->is_success) {
+        my $res = $self->{ua}->request($req);
+
+        if ($res->is_success) {
+            my $data = decode_json($res->content);
+            $self->{token}      = $data->{token};
+            $self->{session_id} = $data->{sessionId};
+            return $self->{token};
+        }
+
+        my $code = $res->code;
+        if (($code == 429 || $code >= 500) && $retries < $MAX_RETRIES) {
+            $retries++;
+            my $delay = $RETRY_DELAY * $retries;
+            if (my $retry_after = $res->header('Retry-After')) {
+                $delay = $retry_after if $retry_after =~ /^\d+$/ && $retry_after > $delay;
+            }
+            sleep($delay);
+            next;
+        }
+
         croak "Login failed: " . $res->status_line . " " . $res->content;
     }
-
-    my $data = decode_json($res->content);
-    $self->{token}      = $data->{token};
-    $self->{session_id} = $data->{sessionId};
-
-    return $self->{token};
 }
 
 sub logout {
@@ -665,10 +693,23 @@ sub _request {
             next;
         }
 
-        # 5xx or 409 (resource locked) - retry with backoff
-        if (($code >= 500 || $code == 409) && $retries < $MAX_RETRIES) {
+        # Decide whether this failure is safe to retry. A 429 means the request was
+        # rate-limited *before* being processed, so it is always safe to resend —
+        # even a POST. For 5xx and 409 the server may have already applied a
+        # non-idempotent POST (create LDEV / map LUN / expand), and resending would
+        # double-create or double-apply, so those are only retried for idempotent
+        # methods (GET/PUT/DELETE/HEAD).
+        my $idempotent = $method =~ /^(?:GET|PUT|DELETE|HEAD)$/i;
+        my $retriable  = ($code == 429)
+            || ($idempotent && ($code >= 500 || $code == 409));
+
+        if ($retriable && $retries < $MAX_RETRIES) {
             $retries++;
-            sleep($RETRY_DELAY * $retries);
+            my $delay = $RETRY_DELAY * $retries;
+            if (my $retry_after = $res->header('Retry-After')) {
+                $delay = $retry_after if $retry_after =~ /^\d+$/ && $retry_after > $delay;
+            }
+            sleep($delay);
             next;
         }
 
@@ -684,9 +725,23 @@ sub _wait_for_job {
     return $res unless ref $res eq 'HASH';
 
     my $job_id = $res->{jobId};
-    return $res unless $job_id;
 
-    my $url = "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/jobs/$job_id";
+    # Some async operations return only a Location header pointing at the job
+    # resource instead of a jobId in the body. Derive the job URL from either.
+    my $url;
+    if ($job_id) {
+        $url = "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/jobs/$job_id";
+    } elsif ($res->{location}) {
+        my $loc = $res->{location};
+        # Location may be absolute or relative to the API root.
+        $url = $loc =~ m{^https?://}
+            ? $loc
+            : "https://$self->{mgmt_ip}:$self->{port}$loc";
+        ($job_id) = $loc =~ m{/jobs/([^/]+)} ;
+        $job_id //= $loc;
+    } else {
+        return $res;
+    }
 
     my $elapsed = 0;
     while ($elapsed < $JOB_POLL_TIMEOUT) {

@@ -465,4 +465,142 @@ subtest 'wait_for_job_extracts_resource_id' => sub {
     is($result->{resourceId}, 99, 'extracted resource ID from job');
 };
 
+subtest 'wait_for_job_polls_location_only_response' => sub {
+    # Async responses that carry only a Location header (no jobId) must still be
+    # polled to completion instead of being treated as already finished.
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses(
+        { state => 'Succeeded', affectedResources => ['/ldevs/55'] },
+    );
+
+    my $result = $client->_wait_for_job(
+        { location => '/ConfigurationManager/v1/objects/jobs/job-loc' });
+    is($result->{resourceId}, 55, 'Location-only async response polled to completion');
+
+    my @log = MockRestClient::get_request_log();
+    like($log[0]{url}, qr{/jobs/job-loc}, 'polled the job URL from Location');
+};
+
+# ── Retry behaviour (exercises the real _request via a fake UserAgent) ──
+
+package FakeUA;
+sub new { return bless { responses => $_[1] }, $_[0] }
+sub request {
+    my ($self) = @_;
+    return shift @{$self->{responses}};
+}
+
+package main;
+
+use HTTP::Response;
+
+subtest 'request_retries_on_429_then_succeeds' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip    => '10.0.1.100',
+        storage_id => '123',
+        username   => 'admin',
+        password   => 'secret',
+    );
+    $client->{token} = 'tok';
+
+    my $r429 = HTTP::Response->new(429, 'Too Many Requests',
+        ['Retry-After' => '1'], '');
+    my $r200 = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"ok":1}');
+    $client->{ua} = FakeUA->new([$r429, $r200]);
+
+    my $out = $client->_request('GET', 'https://x/y');
+    is($out->{ok}, 1, 'retried after 429 rate-limit and returned success');
+};
+
+subtest 'request_retries_get_on_5xx' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '123',
+        username => 'admin', password => 'secret');
+    $client->{token} = 'tok';
+
+    my $r500 = HTTP::Response->new(500, 'Server Error',
+        ['Retry-After' => '0'], '');
+    my $r200 = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"ok":1}');
+    $client->{ua} = FakeUA->new([$r500, $r200]);
+
+    my $out = $client->_request('GET', 'https://x/y');
+    is($out->{ok}, 1, 'idempotent GET retried on 5xx and succeeded');
+};
+
+subtest 'request_does_not_retry_post_on_5xx' => sub {
+    # A non-idempotent POST must NOT be resent on 5xx: the array may already have
+    # created the resource, so a retry would double-create. It must fail loudly.
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '123',
+        username => 'admin', password => 'secret');
+    $client->{token} = 'tok';
+
+    my $r500a = HTTP::Response->new(500, 'Server Error', [], '');
+    my $r500b = HTTP::Response->new(500, 'Server Error', [], '');
+    my $ua = FakeUA->new([$r500a, $r500b]);
+    $client->{ua} = $ua;
+
+    eval { $client->_request('POST', 'https://x/ldevs', { poolId => 0 }) };
+    like($@, qr/API request failed/, 'POST on 5xx fails without retry');
+    is(scalar @{$ua->{responses}}, 1, 'only one POST attempt was made (no retry)');
+};
+
+subtest 'request_retries_post_on_429' => sub {
+    # 429 means the request was rejected before processing, so even a POST is safe
+    # to resend.
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '123',
+        username => 'admin', password => 'secret');
+    $client->{token} = 'tok';
+
+    my $r429 = HTTP::Response->new(429, 'Too Many Requests',
+        ['Retry-After' => '0'], '');
+    my $r200 = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"ok":1}');
+    $client->{ua} = FakeUA->new([$r429, $r200]);
+
+    my $out = $client->_request('POST', 'https://x/ldevs', { poolId => 0 });
+    is($out->{ok}, 1, 'POST retried on 429 rate-limit and succeeded');
+};
+
+subtest 'login_retries_on_429' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '123',
+        username => 'admin', password => 'secret');
+
+    my $r429   = HTTP::Response->new(429, 'Too Many Requests',
+        ['Retry-After' => '0'], '');
+    my $rlogin = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"token":"new","sessionId":"s1"}');
+    $client->{ua} = FakeUA->new([$r429, $rlogin]);
+
+    my $token = $client->login();
+    is($token, 'new', 'login retried on 429 and obtained a token');
+    is($client->{session_id}, 's1', 'session id captured after retry');
+};
+
+subtest 'request_reauth_on_401' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip    => '10.0.1.100',
+        storage_id => '123',
+        username   => 'admin',
+        password   => 'secret',
+    );
+    $client->{token} = 'old';
+
+    my $r401   = HTTP::Response->new(401, 'Unauthorized', [], '');
+    my $rlogin = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"token":"new","sessionId":"s1"}');
+    my $r200   = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"done":1}');
+    # request() -> 401, then login()'s request() -> token, then retried request() -> 200
+    $client->{ua} = FakeUA->new([$r401, $rlogin, $r200]);
+
+    my $out = $client->_request('GET', 'https://x/y');
+    is($out->{done}, 1, 're-authenticated on 401 and retried');
+    is($client->{token}, 'new', 'token refreshed by re-login');
+};
+
 done_testing();

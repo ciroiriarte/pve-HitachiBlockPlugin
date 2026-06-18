@@ -17,7 +17,12 @@ use POSIX qw(ceil);
 # ── Plugin Identity ──
 
 sub api {
-    return 1;
+    # Storage plugin API version this module targets. PVE warns about (and may
+    # disable) plugins whose api() is older than (APIVER - APIAGE) on the running
+    # node; several methods used here (rename_volume, volume_has_feature,
+    # volume_snapshot_info) require >= 10. Reconcile this with the deployment's
+    # pve-storage APIVER/APIAGE before raising it further.
+    return 10;
 }
 
 sub type {
@@ -36,11 +41,15 @@ sub plugindata {
 sub properties {
     return {
         mgmt_ip => {
-            description => "Management IP or hostname of the Hitachi Configuration Manager.",
+            description => "Management IP or hostname of the Configuration Manager REST"
+                . " API endpoint — the array's embedded/GUM controller (direct"
+                . " connection) or a dedicated Ops Center Configuration Manager server.",
             type        => 'string',
         },
         storage_id => {
-            description => "Storage system serial number / device ID.",
+            description => "Storage device ID (storageDeviceId) of the array, e.g. the"
+                . " 12-digit model+serial id returned by GET /v1/objects/storages — not"
+                . " the bare serial number.",
             type        => 'string',
         },
         pool_id => {
@@ -65,14 +74,18 @@ sub properties {
             optional    => 1,
         },
         platform => {
-            description => "Storage platform type: vsp_g or vsp_one.",
+            description => "Storage platform type. Sets the default API port: 'vsp_one'"
+                . " and 'vsp_e' (e.g. VSP E590H, direct/embedded REST API) use 443;"
+                . " 'vsp_g' uses 23451 (Ops Center Configuration Manager server). Override"
+                . " with mgmt_port when fronting any model with a CM server or vice versa.",
             type        => 'string',
-            enum        => ['vsp_g', 'vsp_one'],
+            enum        => ['vsp_g', 'vsp_e', 'vsp_one'],
             default     => 'vsp_one',
             optional    => 1,
         },
         mgmt_port => {
-            description => "Management API port (auto-detected from platform if omitted).",
+            description => "Management API port (auto-detected from platform if omitted:"
+                . " 443 for direct/embedded REST, 23451 for an Ops Center CM server).",
             type        => 'integer',
             optional    => 1,
         },
@@ -129,7 +142,8 @@ sub properties {
             optional    => 1,
         },
         port_scheduler => {
-            description => "Enable round-robin port selection for LUN mappings (distributes I/O across ports).",
+            description => "Spread LUN mappings across target ports using stable, deterministic"
+                . " per-LDEV port selection (a volume always maps to the same port pair on every node).",
             type        => 'boolean',
             default     => 0,
             optional    => 1,
@@ -145,6 +159,17 @@ sub properties {
             description => "Auto-delete empty host groups on storage deactivation.",
             type        => 'boolean',
             default     => 0,
+            optional    => 1,
+        },
+        tls_verify => {
+            description => "Verify the Configuration Manager TLS certificate (default off for self-signed certs).",
+            type        => 'boolean',
+            default     => 0,
+            optional    => 1,
+        },
+        tls_ca_file => {
+            description => "Path to a CA bundle used to verify the API certificate when tls_verify is enabled.",
+            type        => 'string',
             optional    => 1,
         },
     };
@@ -176,6 +201,8 @@ sub options {
         port_scheduler    => { optional => 1 },
         copy_speed        => { optional => 1 },
         group_delete      => { optional => 1 },
+        tls_verify        => { optional => 1 },
+        tls_ca_file       => { optional => 1 },
     };
 }
 
@@ -220,7 +247,6 @@ sub on_delete_hook {
 # ── Storage Lifecycle ──
 
 my %_clients;        # cache: storeid -> RestClient
-my %_port_counters;  # port scheduler: storeid -> next port index
 
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
@@ -263,17 +289,12 @@ sub status {
     my $client = $class->_client($storeid);
     my $pool = $client->get_pool($scfg->{pool_id});
 
-    # Pool capacities are in bytes (or block count depending on API version)
-    my $total = ($pool->{totalPoolCapacity}  || 0);
-    my $used  = ($pool->{usedPoolCapacity}   || 0);
+    # Hitachi Configuration Manager reports DP pool capacities in MB; convert to
+    # bytes for PVE. (Documented unit — no value-magnitude guessing.)
+    my $total = ($pool->{totalPoolCapacity} || 0) * 1024 * 1024;
+    my $used  = ($pool->{usedPoolCapacity}  || 0) * 1024 * 1024;
     my $free  = $total - $used;
-
-    # Convert from MB to bytes if needed (API returns MB)
-    if ($total < 1_000_000_000 && $total > 0) {
-        $total *= 1024 * 1024;
-        $used  *= 1024 * 1024;
-        $free  *= 1024 * 1024;
-    }
+    $free = 0 if $free < 0;
 
     return ($total, $free, $used, 1);
 }
@@ -289,8 +310,18 @@ sub alloc_image {
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
-    # Generate volume name
-    $name = $class->_next_volname($config, $vmid) unless $name;
+    # Reserve a unique volume name under the cluster lock unless PVE supplied one.
+    # When PVE supplies an explicit name, reject it if it already maps to an LDEV
+    # so we never create a second array volume behind an existing volid.
+    my $reserved = 0;
+    unless ($name) {
+        $name = $config->reserve_volname($vmid);
+        $reserved = 1;
+    } else {
+        my ($existing_id) = $config->lookup_ldev($name);
+        die "Volume '$name' already exists in registry (LDEV $existing_id)\n"
+            if defined $existing_id;
+    }
 
     # Size is in KiB from PVE, convert to MB for Hitachi API
     my $size_mb = ceil($size / 1024);
@@ -302,57 +333,52 @@ sub alloc_image {
         size_mb => $size_mb,
     );
     if ($scfg->{ldev_range}) {
-        my $ldev_id = $class->_next_ldev_in_range($client, $scfg);
-        $create_opts{ldev_id} = $ldev_id;
+        $create_opts{ldev_id} = $class->_next_ldev_in_range($client, $scfg, $config);
     }
 
-    my $result = $client->create_ldev(%create_opts);
-    my $ldev_id = $result->{resourceId}
-        or die "Failed to get LDEV ID from create response\n";
+    my $ldev_id;
+    my $committed = 0;
 
-    # Set label for identification
-    my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $name);
-    eval { $client->set_ldev_label($ldev_id, $label) };
-    if ($@) {
-        # Cleanup: delete LDEV on label failure since it's unidentifiable
-        warn "Failed to set LDEV label, cleaning up LDEV $ldev_id: $@";
-        eval { $client->delete_ldev($ldev_id) };
-        die "Failed to set LDEV label for '$name'\n";
-    }
-
-    # Register in local map
-    my $wwid = $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
-
-    $config->register_ldev($name, $ldev_id,
-        wwid     => $wwid,
-        size_mb  => $size_mb,
-        pool_id  => $scfg->{pool_id},
-    );
-
-    # Apply QoS limits if configured
-    my %qos;
-    $qos{upper_iops}        = $scfg->{qos_upper_iops} if $scfg->{qos_upper_iops};
-    $qos{upper_mbps}        = $scfg->{qos_upper_mbps} if $scfg->{qos_upper_mbps};
-    $qos{lower_iops}        = $scfg->{qos_lower_iops} if $scfg->{qos_lower_iops};
-    $qos{lower_mbps}        = $scfg->{qos_lower_mbps} if $scfg->{qos_lower_mbps};
-    $qos{response_priority} = $scfg->{qos_priority}   if $scfg->{qos_priority};
-    if (%qos) {
-        eval { $client->set_ldev_qos($ldev_id, %qos) };
-        warn "QoS application warning: $@" if $@;
-    }
-
-    # Map LUN to local host groups on all target ports
-    eval { $class->_map_lun_to_local($storeid, $scfg, $client, $ldev_id) };
-    if ($@) {
-        warn "LUN mapping failed: $@";
-    }
-
-    # Rescan SCSI bus to discover new device
     eval {
-        $multipath->rescan_scsi_hosts();
-        $multipath->wait_for_device($wwid);
+        my $result = $client->create_ldev(%create_opts);
+        $ldev_id = $result->{resourceId}
+            or die "Failed to get LDEV ID from create response\n";
+
+        # Label for identification (prerequisite for orphan detection)
+        my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $name);
+        $client->set_ldev_label($ldev_id, $label);
+
+        # QoS is best-effort: a limit-set failure must not fail provisioning.
+        my %qos = $class->_qos_from_scfg($scfg);
+        if (%qos) {
+            eval { $client->set_ldev_qos($ldev_id, %qos) };
+            warn "QoS application warning: $@" if $@;
+        }
+
+        # Mapping + device discovery are prerequisites for a usable volume:
+        # failure here is fatal (no silent "ghost" volumes).
+        $class->_map_lun_to_local($storeid, $scfg, $client, $ldev_id);
+
+        my $synth = $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+        my ($wwid) = $class->_resolve_wwid($multipath, $ldev_id, $synth);
+
+        # Commit to the registry LAST, once the volume is real and discoverable.
+        $config->register_ldev($name, $ldev_id,
+            wwid    => $wwid,
+            size_mb => $size_mb,
+            pool_id => $scfg->{pool_id},
+        );
+        $committed = 1;
     };
-    warn "Device discovery warning: $@" if $@;
+    if (my $err = $@) {
+        # Roll back array-side resources and the name reservation.
+        if (defined $ldev_id) {
+            eval { $class->_unmap_lun_from_local($storeid, $scfg, $client, $ldev_id) };
+            eval { $client->delete_ldev($ldev_id) };
+        }
+        eval { $config->unregister_ldev($name) } if $reserved && !$committed;
+        die "Failed to allocate volume '$name': $err";
+    }
 
     return $name;
 }
@@ -366,6 +392,14 @@ sub free_image {
 
     my ($ldev_id, $meta) = $config->lookup_ldev($volname);
     die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+
+    # Refuse deletion while linked clones (Thin Image children) still depend on
+    # this volume as their P-VOL — deleting it would corrupt those clones.
+    my $deps = $config->find_dependents($volname);
+    if (@$deps) {
+        die "Cannot delete '$volname': linked clone(s) depend on it: "
+            . join(', ', sort @$deps) . "\n";
+    }
 
     # Delete any snapshot pairs first
     eval {
@@ -406,14 +440,18 @@ sub list_images {
     my $registry = $config->list_registered();
 
     my @res;
-    my $label_prefix = "pve:${storeid}:";
 
     for my $volname (sort keys %$registry) {
         my $entry = $registry->{$volname};
 
+        # Skip name reservations (no LDEV committed yet).
+        next unless ref $entry eq 'HASH' && defined $entry->{ldev_id};
+
+        my $evmid = ($volname =~ /^(?:vm|base)-(\d+)-/) ? $1 : 0;
+
         # Filter by vmid if specified
         if ($vmid) {
-            next unless $volname =~ /^vm-(\d+)-/ && $1 == $vmid;
+            next unless $evmid == $vmid;
         }
 
         # Filter by vollist if specified
@@ -431,7 +469,7 @@ sub list_images {
             volid  => "$storeid:$volname",
             format => 'raw',
             size   => $size,
-            vmid   => ($volname =~ /^vm-(\d+)-/) ? $1 : 0,
+            vmid   => $evmid,
             parent => $parent,
         };
     }
@@ -547,13 +585,31 @@ sub filesystem_path {
 
     my $path = $multipath->get_device_path($wwid);
 
-    return wantarray ? ($path, vmid_from_volname($volname), 'raw') : $path;
+    # PVE contract: the third element is the volume TYPE (vtype), not the format.
+    return wantarray ? ($path, vmid_from_volname($volname), 'images') : $path;
 }
 
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
     return $class->filesystem_path($scfg, $volname, $storeid, $snapname);
+}
+
+# Override the inherited (path-based) implementation: report size straight from
+# the registry/array instead of shelling out to qemu-img on a raw block device.
+sub volume_size_info {
+    my ($class, $scfg, $storeid, $volname, $timeout) = @_;
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    my ($ldev_id, $meta) = $config->lookup_ldev($volname);
+    die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+
+    my $size = ($meta->{size_mb} || 0) * 1024 * 1024;
+    my $parent = $meta->{parent_volname}
+        ? "$storeid:$meta->{parent_volname}" : undef;
+
+    # raw block volumes are fully provisioned from PVE's perspective: used == size
+    return wantarray ? ($size, 'raw', $size, $parent) : $size;
 }
 
 # ── Snapshots ──
@@ -569,7 +625,9 @@ sub volume_snapshot {
     die "Volume '$volname' not found\n" unless defined $ldev_id;
 
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
-    my $snap_group = "pve_${storeid}_${snap}";
+    # Encode the volume's LDEV id into the group name so the array-side fallback
+    # search cannot resolve to another volume's pair with the same snapshot name.
+    my $snap_group = "pve_${storeid}_${ldev_id}_${snap}";
 
     my %snap_opts = (
         pvol_ldev_id   => $ldev_id,
@@ -621,6 +679,15 @@ sub volume_snapshot_delete {
     my ($ldev_id) = $config->lookup_ldev($volname);
     die "Volume '$volname' not found\n" unless defined $ldev_id;
 
+    # Refuse deletion while linked clones were created from THIS snapshot — their
+    # S-VOL still shares blocks with the snapshot pair, so deleting it would
+    # corrupt those clones. Promote/remove the clones first.
+    my $snap_deps = $config->find_snapshot_dependents($volname, $snap);
+    if (@$snap_deps) {
+        die "Cannot delete snapshot '$snap' of '$volname': linked clone(s) depend"
+            . " on it: " . join(', ', sort @$snap_deps) . "\n";
+    }
+
     # Try registry first for fast lookup
     my $snap_meta = $config->lookup_snapshot($volname, $snap);
 
@@ -634,12 +701,17 @@ sub volume_snapshot_delete {
         }
     }
 
-    # Fallback: search by snapshot group name on the array
+    # Fallback: search by snapshot group name on the array. Accept both the
+    # volume-specific name and the legacy name (for pairs created by older
+    # versions) so existing snapshots remain manageable after upgrade.
     my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id);
-    my $target_group = "pve_${storeid}_${snap}";
+    my %target_groups = (
+        "pve_${storeid}_${ldev_id}_${snap}" => 1,
+        "pve_${storeid}_${snap}"            => 1,
+    );
 
     for my $s (@$snaps) {
-        if (($s->{snapshotGroupName} || '') eq $target_group) {
+        if ($target_groups{ $s->{snapshotGroupName} || '' }) {
             $client->delete_snapshot($s->{snapshotId});
             $config->unregister_snapshot($volname, $snap);
             return 1;
@@ -668,12 +740,15 @@ sub volume_snapshot_rollback {
         warn "Direct snapshot restore failed, falling back to search: $@" if $@;
     }
 
-    # Fallback: search by group name
+    # Fallback: search by group name (volume-specific or legacy).
     my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id);
-    my $target_group = "pve_${storeid}_${snap}";
+    my %target_groups = (
+        "pve_${storeid}_${ldev_id}_${snap}" => 1,
+        "pve_${storeid}_${snap}"            => 1,
+    );
 
     for my $s (@$snaps) {
-        if (($s->{snapshotGroupName} || '') eq $target_group) {
+        if ($target_groups{ $s->{snapshotGroupName} || '' }) {
             $client->restore_snapshot($s->{snapshotId});
             return 1;
         }
@@ -756,7 +831,7 @@ sub clone_image {
         }
     }
 
-    my $new_name = $class->_next_volname($config, $vmid);
+    my $new_name = $config->reserve_volname($vmid);
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
     my $size_mb = $src_meta->{size_mb} || 1;
 
@@ -765,66 +840,75 @@ sub clone_image {
     # for same-storage, full=0 means linked clone
     my $is_full = ($target && $target ne $storeid) ? 1 : 0;
 
-    my $new_ldev_id;
-
     my $copy_speed = $scfg->{copy_speed};
-
-    if ($is_full) {
-        # Full clone: create new independent LDEV, copy data via array-side clone
-        my $result = $client->create_ldev(
-            pool_id => $scfg->{pool_id},
-            size_mb => $size_mb,
-        );
-        $new_ldev_id = $result->{resourceId}
-            or die "Failed to create target LDEV for full clone\n";
-
-        $client->clone_snapshot_to_ldev(
-            pvol_ldev_id   => $clone_source_ldev,
-            svol_ldev_id   => $new_ldev_id,
-            snap_pool_id   => $snap_pool_id,
-            snapshot_group => "pve_clone_${storeid}",
-            ($copy_speed ? (copy_speed => $copy_speed) : ()),
-        );
-    } else {
-        # Linked clone: Thin Image pair (S-VOL shares blocks via CoW)
-        my $result = $client->create_ldev(
-            pool_id => $snap_pool_id,
-            size_mb => $size_mb,
-        );
-        $new_ldev_id = $result->{resourceId}
-            or die "Failed to create S-VOL for linked clone\n";
-
-        $client->clone_snapshot_to_ldev(
-            pvol_ldev_id   => $clone_source_ldev,
-            svol_ldev_id   => $new_ldev_id,
-            snap_pool_id   => $snap_pool_id,
-            snapshot_group => "pve_lclone_${storeid}",
-            ($copy_speed ? (copy_speed => $copy_speed) : ()),
-        );
-    }
-
-    # Label and register new LDEV
-    my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $new_name);
-    eval { $client->set_ldev_label($new_ldev_id, $label) };
-    warn "Failed to set clone label: $@" if $@;
-
-    my $wwid = $multipath->ldev_to_wwid($scfg->{storage_id}, $new_ldev_id);
-    $config->register_ldev($new_name, $new_ldev_id,
-        wwid           => $wwid,
-        size_mb        => $size_mb,
-        pool_id        => $is_full ? $scfg->{pool_id} : $snap_pool_id,
-        parent_volname => $is_full ? undef : $volname,
-    );
-
-    # Map and discover
-    eval { $class->_map_lun_to_local($storeid, $scfg, $client, $new_ldev_id) };
-    warn "Clone LUN mapping: $@" if $@;
+    my $new_ldev_id;
+    my $committed = 0;
 
     eval {
-        $multipath->rescan_scsi_hosts();
-        $multipath->wait_for_device($wwid);
+        if ($is_full) {
+            # Full clone: create new independent LDEV, copy data via array-side clone
+            my $result = $client->create_ldev(
+                pool_id => $scfg->{pool_id},
+                size_mb => $size_mb,
+            );
+            $new_ldev_id = $result->{resourceId}
+                or die "Failed to create target LDEV for full clone\n";
+
+            $client->clone_snapshot_to_ldev(
+                pvol_ldev_id   => $clone_source_ldev,
+                svol_ldev_id   => $new_ldev_id,
+                snap_pool_id   => $snap_pool_id,
+                snapshot_group => "pve_clone_${storeid}",
+                ($copy_speed ? (copy_speed => $copy_speed) : ()),
+            );
+        } else {
+            # Linked clone: Thin Image pair (S-VOL shares blocks via CoW)
+            my $result = $client->create_ldev(
+                pool_id => $snap_pool_id,
+                size_mb => $size_mb,
+            );
+            $new_ldev_id = $result->{resourceId}
+                or die "Failed to create S-VOL for linked clone\n";
+
+            $client->clone_snapshot_to_ldev(
+                pvol_ldev_id   => $clone_source_ldev,
+                svol_ldev_id   => $new_ldev_id,
+                snap_pool_id   => $snap_pool_id,
+                snapshot_group => "pve_lclone_${storeid}",
+                ($copy_speed ? (copy_speed => $copy_speed) : ()),
+            );
+        }
+
+        # Label (prerequisite for orphan detection)
+        my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $new_name);
+        $client->set_ldev_label($new_ldev_id, $label);
+
+        # Map + discover are prerequisites for a usable clone: failure is fatal.
+        $class->_map_lun_to_local($storeid, $scfg, $client, $new_ldev_id);
+
+        my $synth = $multipath->ldev_to_wwid($scfg->{storage_id}, $new_ldev_id);
+        my ($wwid) = $class->_resolve_wwid($multipath, $new_ldev_id, $synth);
+
+        # Commit to the registry LAST. For linked clones, record the source volume
+        # and (when cloned from a snapshot) the source snapshot, so deletion of
+        # either is refused while this clone still depends on it.
+        $config->register_ldev($new_name, $new_ldev_id,
+            wwid           => $wwid,
+            size_mb        => $size_mb,
+            pool_id        => $is_full ? $scfg->{pool_id} : $snap_pool_id,
+            parent_volname => $is_full ? undef : $volname,
+            parent_snap    => ($is_full || !$snap) ? undef : $snap,
+        );
+        $committed = 1;
     };
-    warn "Clone device discovery: $@" if $@;
+    if (my $err = $@) {
+        if (defined $new_ldev_id) {
+            eval { $class->_unmap_lun_from_local($storeid, $scfg, $client, $new_ldev_id) };
+            eval { $client->delete_ldev($new_ldev_id) };
+        }
+        eval { $config->unregister_ldev($new_name) } unless $committed;
+        die "Failed to clone '$volname' to '$new_name': $err";
+    }
 
     return $new_name;
 }
@@ -843,22 +927,7 @@ sub volume_resize {
 
     # Verify current size from array to avoid stale registry data
     my $ldev_info = eval { $client->get_ldev($ldev_id) };
-    my $current_mb;
-    if ($ldev_info && $ldev_info->{byteFormatCapacity}) {
-        # Parse "1024.00 M" or "1.00 G" format
-        my $cap = $ldev_info->{byteFormatCapacity};
-        if ($cap =~ /^([\d.]+)\s*G/i) {
-            $current_mb = int($1 * 1024);
-        } elsif ($cap =~ /^([\d.]+)\s*T/i) {
-            $current_mb = int($1 * 1024 * 1024);
-        } elsif ($cap =~ /^([\d.]+)\s*M/i) {
-            $current_mb = int($1);
-        } else {
-            $current_mb = $meta->{size_mb} || 0;
-        }
-    } else {
-        $current_mb = $meta->{size_mb} || 0;
-    }
+    my $current_mb = $class->_ldev_size_mb($ldev_info) || $meta->{size_mb} || 0;
 
     # Size is in bytes from PVE, convert to MB
     my $new_size_mb = ceil($size / (1024 * 1024));
@@ -877,15 +946,15 @@ sub volume_resize {
     # Expand LDEV on array
     $client->expand_ldev($ldev_id, $additional);
 
-    # Update registry with verified current size
+    # Resize multipath device on host
+    eval { $multipath->resize_device($wwid) };
+    warn "Host-side resize warning: $@" if $@;
+
+    # Commit the new size to the registry after the array expansion succeeded.
     $config->register_ldev($volname, $ldev_id,
         %$meta,
         size_mb => $new_size_mb,
     );
-
-    # Resize multipath device on host
-    eval { $multipath->resize_device($wwid) };
-    warn "Host-side resize warning: $@" if $@;
 
     return 1;
 }
@@ -934,11 +1003,13 @@ sub _get_client {
     my $port = $scfg->{mgmt_port} || $defaults->{port};
 
     return PVE::Storage::HitachiBlock::RestClient->new(
-        mgmt_ip    => $scfg->{mgmt_ip},
-        port       => $port,
-        storage_id => $scfg->{storage_id},
-        username   => $username,
-        password   => $password,
+        mgmt_ip     => $scfg->{mgmt_ip},
+        port        => $port,
+        storage_id  => $scfg->{storage_id},
+        username    => $username,
+        password    => $password,
+        tls_verify  => $scfg->{tls_verify},
+        tls_ca_file => $scfg->{tls_ca_file},
     );
 }
 
@@ -1001,7 +1072,7 @@ sub _map_lun_to_local {
 
     return unless @$wwns;
 
-    my @ports = $class->_select_ports($storeid, $scfg);
+    my @ports = $class->_select_ports($storeid, $scfg, $ldev_id);
 
     for my $port_id (@ports) {
         $port_id =~ s/^\s+|\s+$//g;
@@ -1068,41 +1139,86 @@ sub _unmap_lun_from_local {
     return 1;
 }
 
-sub _next_volname {
-    my ($class, $config, $vmid) = @_;
+sub _qos_from_scfg {
+    my ($class, $scfg) = @_;
 
-    my $registry = $config->list_registered();
-    my $max_seq = 0;
+    my %qos;
+    $qos{upper_iops}        = $scfg->{qos_upper_iops} if $scfg->{qos_upper_iops};
+    $qos{upper_mbps}        = $scfg->{qos_upper_mbps} if $scfg->{qos_upper_mbps};
+    $qos{lower_iops}        = $scfg->{qos_lower_iops} if $scfg->{qos_lower_iops};
+    $qos{lower_mbps}        = $scfg->{qos_lower_mbps} if $scfg->{qos_lower_mbps};
+    $qos{response_priority} = $scfg->{qos_priority}   if $scfg->{qos_priority};
+    return %qos;
+}
 
-    for my $name (keys %$registry) {
-        if ($name =~ /^vm-${vmid}-disk-(\d+)$/) {
-            $max_seq = $1 if $1 > $max_seq;
+# Derive an LDEV's size in MB, preferring the exact block count (512-byte blocks)
+# over the human-formatted byteFormatCapacity string.
+sub _ldev_size_mb {
+    my ($class, $ldev) = @_;
+
+    return 0 unless $ldev && ref $ldev eq 'HASH';
+
+    for my $field (qw(blockCapacity numOfBlocks)) {
+        my $blocks = $ldev->{$field};
+        if (defined $blocks && $blocks =~ /^\d+$/) {
+            return int($blocks * 512 / (1024 * 1024));
         }
     }
 
-    return "vm-${vmid}-disk-" . ($max_seq + 1);
+    my $cap = $ldev->{byteFormatCapacity};
+    if (defined $cap) {
+        return int($1 * 1024 * 1024) if $cap =~ /^([\d.]+)\s*T/i;
+        return int($1 * 1024)        if $cap =~ /^([\d.]+)\s*G/i;
+        return int($1)               if $cap =~ /^([\d.]+)\s*M/i;
+    }
+
+    return 0;
+}
+
+# Discover the volume's real WWID and wait for its multipath device. Tries the
+# synthesized NAA first (fast path / correct on matching models); if that does
+# not resolve, self-corrects by reading the actual page-83 identifier from sysfs.
+# Returns ($wwid, $path); croaks if no device appears (fatal for the caller).
+sub _resolve_wwid {
+    my ($class, $multipath, $ldev_id, $synth_wwid) = @_;
+
+    $multipath->rescan_scsi_hosts();
+
+    my $path = eval { $multipath->wait_for_device($synth_wwid, 20) };
+    return ($synth_wwid, $path) if $path;
+
+    my $real = $multipath->discover_wwid($ldev_id);
+    if ($real && $real ne $synth_wwid) {
+        my $rpath = $multipath->wait_for_device($real);
+        return ($real, $rpath);
+    }
+
+    # Last resort: full-timeout wait on the synthesized WWID (croaks on failure).
+    my $fpath = $multipath->wait_for_device($synth_wwid);
+    return ($synth_wwid, $fpath);
 }
 
 sub _select_ports {
-    my ($class, $storeid, $scfg) = @_;
+    my ($class, $storeid, $scfg, $ldev_id) = @_;
 
     my @all_ports = split(/,/, $scfg->{target_ports} || '');
-    @all_ports = map { s/^\s+|\s+$//g; $_ } @all_ports;
+    @all_ports = map { my $p = $_; $p =~ s/^\s+|\s+$//g; $p } @all_ports;
 
     return @all_ports unless $scfg->{port_scheduler} && @all_ports > 2;
 
-    # Round-robin: select 2 ports for multipath redundancy
-    my $idx = ($_port_counters{$storeid} || 0) % scalar(@all_ports);
-    my $next_idx = ($idx + 1) % scalar(@all_ports);
+    # Deterministic per-LDEV selection: a given volume always maps to the same
+    # two ports (stable across processes and cluster nodes — no in-memory counter
+    # to reset), providing multipath redundancy while spreading volumes across
+    # ports. Falls back to ports 0/1 when no LDEV context is available.
+    my $n = scalar(@all_ports);
+    my $idx = defined $ldev_id ? ($ldev_id % $n) : 0;
+    my $next_idx = ($idx + 1) % $n;
 
-    my @selected = ($all_ports[$idx], $all_ports[$next_idx]);
-    $_port_counters{$storeid} = $next_idx + 1;
-
-    return @selected;
+    return ($all_ports[$idx], $all_ports[$next_idx]);
 }
 
 sub _next_ldev_in_range {
-    my ($class, $client, $scfg) = @_;
+    my ($class, $client, $scfg, $config) = @_;
 
     my $range = $scfg->{ldev_range}
         or die "ldev_range is not configured\n";
@@ -1120,11 +1236,21 @@ sub _next_ldev_in_range {
 
     die "Invalid ldev_range: min ($min) > max ($max)\n" if $min > $max;
 
-    # Get existing LDEVs to find used IDs
-    my $ldevs = $client->list_ldevs(pool_id => $scfg->{pool_id});
+    # Collect used IDs from ALL LDEVs on the array (not just our pool — IDs are
+    # storage-wide) plus any IDs already held in the local registry/reservations,
+    # so concurrent allocations are far less likely to collide. A residual race is
+    # backstopped by the array rejecting a duplicate explicit ldevId on create.
     my %used;
+    my $ldevs = $client->list_ldevs();
     for my $ldev (@$ldevs) {
         $used{$ldev->{ldevId}} = 1 if defined $ldev->{ldevId};
+    }
+    if ($config) {
+        my $registry = $config->list_registered();
+        for my $entry (values %$registry) {
+            next unless ref $entry eq 'HASH';
+            $used{$entry->{ldev_id}} = 1 if defined $entry->{ldev_id};
+        }
     }
 
     for my $id ($min .. $max) {
@@ -1170,17 +1296,52 @@ sub _cleanup_empty_host_groups {
 sub vmid_from_volname {
     my ($volname) = @_;
 
-    return ($volname =~ /^vm-(\d+)-/) ? $1 : 0;
+    return ($volname =~ /^(?:vm|base)-(\d+)-/) ? $1 : 0;
 }
 
 sub parse_volname {
     my ($class, $volname) = @_;
+
+    # Returns: ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format)
+    if ($volname =~ /^base-(\d+)-disk-(\d+)$/) {
+        return ('images', $volname, $1, undef, undef, 1, 'raw');
+    }
 
     if ($volname =~ /^vm-(\d+)-disk-(\d+)$/) {
         return ('images', $volname, $1, undef, undef, undef, 'raw');
     }
 
     die "unable to parse volume name '$volname'\n";
+}
+
+# ── Base / Template Images ──
+
+sub create_base {
+    my ($class, $storeid, $scfg, $volname) = @_;
+
+    my (undef, $name, $vmid, undef, undef, $isBase) = $class->parse_volname($volname);
+    die "create_base not possible for base image '$volname'\n" if $isBase;
+
+    my $client = $class->_client($storeid);
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+
+    my ($ldev_id, $meta) = $config->lookup_ldev($volname);
+    die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+
+    my $deps = $config->find_dependents($volname);
+    die "Cannot convert '$volname' to a base image: linked clone(s) depend on it: "
+        . join(', ', sort @$deps) . "\n" if @$deps;
+
+    my ($disk) = $name =~ /-disk-(\d+)$/;
+    my $base_name = "base-${vmid}-disk-${disk}";
+
+    # Relabel the LDEV and atomically rename the registry entry.
+    my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $base_name);
+    $client->set_ldev_label($ldev_id, $label);
+
+    $config->rename_volume($volname, $base_name);
+
+    return $base_name;
 }
 
 # ── Manage / Unmanage Volumes (LDEV Import) ──
@@ -1199,37 +1360,44 @@ sub manage_volume {
     my $ldev = $client->get_ldev($ldev_id);
     die "LDEV $ldev_id not found on array\n" unless $ldev;
 
-    # Parse current size from array
-    my $size_mb = 0;
-    if ($ldev->{byteFormatCapacity}) {
-        my $cap = $ldev->{byteFormatCapacity};
-        if ($cap =~ /^([\d.]+)\s*G/i)    { $size_mb = int($1 * 1024); }
-        elsif ($cap =~ /^([\d.]+)\s*T/i) { $size_mb = int($1 * 1024 * 1024); }
-        elsif ($cap =~ /^([\d.]+)\s*M/i) { $size_mb = int($1); }
+    # Refuse to import an LDEV that is already tracked under another volname —
+    # otherwise two volids would point at one LDEV.
+    if (my $existing = $config->find_volname_by_ldev($ldev_id)) {
+        die "LDEV $ldev_id is already managed as '$existing'\n";
     }
 
-    # Generate volume name and set label
-    my $name = $class->_next_volname($config, $vmid);
-    my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $name);
-    $client->set_ldev_label($ldev_id, $label);
+    # Current size from the array (prefer exact block count).
+    my $size_mb = $class->_ldev_size_mb($ldev);
 
-    # Register in local map
-    my $wwid = $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
-    $config->register_ldev($name, $ldev_id,
-        wwid    => $wwid,
-        size_mb => $size_mb,
-        pool_id => $ldev->{poolId} // $scfg->{pool_id},
-    );
-
-    # Map LUN and discover device
-    eval { $class->_map_lun_to_local($storeid, $scfg, $client, $ldev_id) };
-    warn "LUN mapping warning: $@" if $@;
+    # Reserve a unique volume name under the cluster lock.
+    my $name = $config->reserve_volname($vmid);
+    my $committed = 0;
 
     eval {
-        $multipath->rescan_scsi_hosts();
-        $multipath->wait_for_device($wwid);
+        my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $name);
+        $client->set_ldev_label($ldev_id, $label);
+
+        # Map + discover are prerequisites: failure is fatal.
+        $class->_map_lun_to_local($storeid, $scfg, $client, $ldev_id);
+
+        my $synth = $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+        my ($wwid) = $class->_resolve_wwid($multipath, $ldev_id, $synth);
+
+        # Commit to the registry LAST.
+        $config->register_ldev($name, $ldev_id,
+            wwid    => $wwid,
+            size_mb => $size_mb,
+            pool_id => $ldev->{poolId} // $scfg->{pool_id},
+        );
+        $committed = 1;
     };
-    warn "Device discovery warning: $@" if $@;
+    if (my $err = $@) {
+        # Roll back the mapping/label but NEVER delete the imported LDEV.
+        eval { $class->_unmap_lun_from_local($storeid, $scfg, $client, $ldev_id) };
+        eval { $client->set_ldev_label($ldev_id, '') };
+        eval { $config->unregister_ldev($name) } unless $committed;
+        die "Failed to manage LDEV $ldev_id as '$name': $err";
+    }
 
     return $name;
 }
@@ -1278,20 +1446,47 @@ sub volume_snapshot_consistency_group {
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
     my $snap_group = "pve_cg_${storeid}_${snap}";
 
-    # Create consistency group snapshot across all volumes
+    # Resolve all LDEV ids up front so a missing volume fails before we create any
+    # pairs at all.
+    my @members;
     for my $volname (@$volnames) {
         my ($ldev_id) = $config->lookup_ldev($volname);
         die "Volume '$volname' not found\n" unless defined $ldev_id;
+        push @members, { volname => $volname, ldev_id => $ldev_id };
+    }
 
-        my %snap_opts = (
-            pvol_ldev_id        => $ldev_id,
-            snap_pool_id        => $snap_pool_id,
-            snapshot_group      => $snap_group,
-            is_consistency_group => 1,
-        );
-        $snap_opts{copy_speed} = $scfg->{copy_speed} if $scfg->{copy_speed};
+    # Create one Thin Image pair per volume, all sharing $snap_group with
+    # isConsistencyGroup set so the array treats them as a single CG. This is the
+    # array's CG primitive, but pairs are still added one call at a time, so if any
+    # call fails we roll back the pairs already created in this group rather than
+    # leaving a half-built, non-crash-consistent group behind.
+    my @created;
+    eval {
+        for my $m (@members) {
+            my %snap_opts = (
+                pvol_ldev_id         => $m->{ldev_id},
+                snap_pool_id         => $snap_pool_id,
+                snapshot_group       => $snap_group,
+                is_consistency_group => 1,
+            );
+            $snap_opts{copy_speed} = $scfg->{copy_speed} if $scfg->{copy_speed};
 
-        $client->create_snapshot(%snap_opts);
+            $client->create_snapshot(%snap_opts);
+            push @created, $m->{ldev_id};
+        }
+    };
+    if (my $err = $@) {
+        for my $ldev_id (@created) {
+            eval {
+                my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id);
+                for my $s (@$snaps) {
+                    next unless ($s->{snapshotGroupName} || '') eq $snap_group;
+                    $client->delete_snapshot($s->{snapshotId}) if $s->{snapshotId};
+                }
+            };
+            warn "CG rollback warning for LDEV $ldev_id: $@" if $@;
+        }
+        die "Consistency group snapshot '$snap' failed and was rolled back: $err";
     }
 
     # Register snapshot metadata for each volume
@@ -1355,13 +1550,34 @@ sub list_orphans {
     my $client = $class->_client($storeid);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $registry = $config->list_registered();
-    my $label_prefix = "pve:${storeid}:";
+    my $label_prefix = PVE::Storage::HitachiBlock::Config->label_prefix($storeid);
 
-    # Get all LDEVs from the pool that have our label prefix
-    my $ldevs = $client->list_ldevs(pool_id => $scfg->{pool_id});
+    # Scan every pool this storage could place volumes in — the data pool, the
+    # snapshot S-VOL pool, and any pool referenced by a registry entry (volumes
+    # imported or migrated from other pools). Scanning only pool_id would make
+    # those volumes look "missing on-array" and let cleanup unregister live data.
+    my %pools;
+    $pools{$scfg->{pool_id}}      = 1 if defined $scfg->{pool_id};
+    $pools{$scfg->{snap_pool_id}} = 1 if defined $scfg->{snap_pool_id};
+    for my $entry (values %$registry) {
+        next unless ref $entry eq 'HASH';
+        $pools{$entry->{pool_id}} = 1 if defined $entry->{pool_id};
+    }
+
+    my %seen_ldev;
+    my $ldevs = [];
+    for my $pid (sort { $a <=> $b } keys %pools) {
+        my $pool_ldevs = $client->list_ldevs(pool_id => $pid);
+        for my $ldev (@$pool_ldevs) {
+            next unless defined $ldev->{ldevId};
+            next if $seen_ldev{$ldev->{ldevId}}++;
+            push @$ldevs, $ldev;
+        }
+    }
 
     my %registered_ldevs;
     for my $entry (values %$registry) {
+        next unless ref $entry eq 'HASH';
         $registered_ldevs{$entry->{ldev_id}} = 1 if defined $entry->{ldev_id};
     }
 

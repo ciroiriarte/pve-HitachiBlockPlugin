@@ -19,6 +19,7 @@
 #   delete        Delete a replication pair
 #   remote-list   List registered remote storage systems
 #   remote-add    Register a remote storage system
+#   orphans       Report LDEV/registry inconsistencies for a storage
 
 use strict;
 use warnings;
@@ -40,6 +41,7 @@ GetOptions(\%opts,
     'remote-ip=s',
     'pvol=i',
     'svol=i',
+    'volume=s',
     'copy-group=s',
     'pair-name=s',
     'pair-id=s',
@@ -47,6 +49,10 @@ GetOptions(\%opts,
     'journal-id=i',
     'quorum-disk-id=i',
     'consistency-group',
+    'mgmt-ip=s',
+    'storage-id=s',
+    'mgmt-port=i',
+    'auto-cleanup',
     'json',
     'help',
 ) or pod2usage(2);
@@ -57,19 +63,27 @@ pod2usage("storeid is required") unless $opts{storeid};
 my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $opts{storeid});
 my ($username, $password) = $config->read_credentials();
 
-# Read storage config (simplified — in production, parse from /etc/pve/storage.cfg)
-# For CLI use, we read from the credential store and expect mgmt_ip etc. as env vars
-# or from a config helper.
-my $mgmt_ip    = $ENV{HITACHI_MGMT_IP}    || die "Set HITACHI_MGMT_IP environment variable\n";
-my $storage_id = $ENV{HITACHI_STORAGE_ID} || die "Set HITACHI_STORAGE_ID environment variable\n";
-my $port       = $ENV{HITACHI_MGMT_PORT}  || 443;
+# Resolve connection parameters. Precedence:
+#   1. explicit CLI flags (--mgmt-ip / --storage-id / --mgmt-port)
+#   2. /etc/pve/storage.cfg for this storeid (the same source the plugin uses)
+#   3. HITACHI_* environment variables (legacy fallback)
+my $scfg = read_storage_cfg($opts{storeid});
+
+my $mgmt_ip = $opts{'mgmt-ip'} || $scfg->{mgmt_ip} || $ENV{HITACHI_MGMT_IP}
+    or die "mgmt_ip not found: pass --mgmt-ip, define the storage in /etc/pve/storage.cfg, or set HITACHI_MGMT_IP\n";
+my $storage_id = $opts{'storage-id'} || $scfg->{storage_id} || $ENV{HITACHI_STORAGE_ID}
+    or die "storage_id not found: pass --storage-id, define the storage in /etc/pve/storage.cfg, or set HITACHI_STORAGE_ID\n";
+my $port = $opts{'mgmt-port'} || $scfg->{mgmt_port} || $ENV{HITACHI_MGMT_PORT}
+    || platform_port($scfg->{platform});
 
 my $client = PVE::Storage::HitachiBlock::RestClient->new(
-    mgmt_ip    => $mgmt_ip,
-    storage_id => $storage_id,
-    username   => $username,
-    password   => $password,
-    port       => $port,
+    mgmt_ip     => $mgmt_ip,
+    storage_id  => $storage_id,
+    username    => $username,
+    password    => $password,
+    port        => $port,
+    tls_verify  => $scfg->{tls_verify},
+    tls_ca_file => $scfg->{tls_ca_file},
 );
 
 $client->login();
@@ -95,6 +109,8 @@ eval {
         cmd_remote_list();
     } elsif ($command eq 'remote-add') {
         cmd_remote_add();
+    } elsif ($command eq 'orphans') {
+        cmd_orphans();
     } else {
         die "Unknown command: '$command'\nRun with --help for usage.\n";
     }
@@ -135,7 +151,12 @@ sub cmd_list {
 sub cmd_create {
     my ($type) = @_;
 
-    die "--pvol is required\n"             unless defined $opts{pvol};
+    # Allow --volume <pve-volname> as a convenience for --pvol <ldev-id>.
+    if (!defined $opts{pvol} && $opts{volume}) {
+        $opts{pvol} = resolve_volume_ldev($opts{volume});
+    }
+
+    die "--pvol (or --volume) is required\n" unless defined $opts{pvol};
     die "--svol is required\n"             unless defined $opts{svol};
     die "--remote-storage-id is required\n" unless $opts{'remote-storage-id'};
     die "--copy-group is required\n"       unless $opts{'copy-group'};
@@ -230,6 +251,117 @@ sub cmd_remote_add {
     print "Registered remote storage: $opts{'remote-storage-id'}\n";
 }
 
+sub cmd_orphans {
+    my $registry = $config->list_registered();
+
+    my %registered;
+    for my $volname (keys %$registry) {
+        my $e = $registry->{$volname};
+        next unless ref $e eq 'HASH' && defined $e->{ldev_id};
+        $registered{$e->{ldev_id}} = $volname;
+    }
+
+    my $prefix = PVE::Storage::HitachiBlock::Config->label_prefix($opts{storeid});
+    my $ldevs  = $client->list_ldevs();
+
+    my %array_ids;
+    my @array_orphans;
+    for my $ldev (@$ldevs) {
+        my $id = $ldev->{ldevId};
+        next unless defined $id;
+        $array_ids{$id} = 1;
+        my $label = $ldev->{label} || '';
+        next unless $label =~ /^\Q$prefix\E/;
+        push @array_orphans, { ldev_id => $id, label => $label }
+            unless $registered{$id};
+    }
+
+    my @registry_orphans;
+    for my $volname (sort keys %$registry) {
+        my $e = $registry->{$volname};
+        next unless ref $e eq 'HASH' && defined $e->{ldev_id};
+        push @registry_orphans, { volname => $volname, ldev_id => $e->{ldev_id} }
+            unless $array_ids{$e->{ldev_id}};
+    }
+
+    # Optionally prune registry entries whose backing LDEV no longer exists. This
+    # is safe because the scan above lists ALL array LDEVs (not just one pool), so
+    # a live volume in any pool is never mistaken for an orphan.
+    my $cleaned = 0;
+    if ($opts{'auto-cleanup'}) {
+        for my $o (@registry_orphans) {
+            $config->unregister_ldev($o->{volname});
+            $cleaned++;
+        }
+    }
+
+    if ($opts{json}) {
+        require JSON;
+        print JSON::encode_json({
+            array_orphans    => \@array_orphans,
+            registry_orphans => \@registry_orphans,
+            cleaned          => $cleaned,
+        }) . "\n";
+        return;
+    }
+
+    print "Array orphans (labeled LDEVs not in registry):\n";
+    print "  none\n" unless @array_orphans;
+    printf "  LDEV %-8s %s\n", $_->{ldev_id}, $_->{label} for @array_orphans;
+
+    print "Registry orphans (registry entries with no array LDEV):\n";
+    print "  none\n" unless @registry_orphans;
+    printf "  %-20s LDEV %s\n", $_->{volname}, $_->{ldev_id} for @registry_orphans;
+
+    print "\nPruned $cleaned stale registry entr" . ($cleaned == 1 ? "y" : "ies") . ".\n"
+        if $opts{'auto-cleanup'};
+}
+
+# ── Helpers ──
+
+sub resolve_volume_ldev {
+    my ($volname) = @_;
+    my $ldev_id = $config->lookup_ldev($volname);
+    die "Volume '$volname' not found in registry for storeid '$opts{storeid}'\n"
+        unless defined $ldev_id;
+    return $ldev_id;
+}
+
+sub platform_port {
+    my ($platform) = @_;
+    my $defaults = PVE::Storage::HitachiBlock::Config->platform_defaults($platform);
+    return $defaults->{port};
+}
+
+# Minimal /etc/pve/storage.cfg parser: returns the property hash for $storeid,
+# or an empty hash if the file or section is absent (env/flags then apply).
+sub read_storage_cfg {
+    my ($storeid) = @_;
+
+    my $file = $ENV{HITACHI_STORAGE_CFG} || '/etc/pve/storage.cfg';
+    return {} unless -r $file;
+
+    open(my $fh, '<', $file) or return {};
+    my %cfg;
+    my $in_section = 0;
+    while (my $line = <$fh>) {
+        if ($line =~ /^\s*hitachiblock:\s*(\S+)\s*$/) {
+            $in_section = ($1 eq $storeid) ? 1 : 0;
+            next;
+        }
+        # A new top-level section (type: id) ends ours.
+        if ($line =~ /^\S+:\s*\S+/) {
+            $in_section = 0 if $line !~ /^\s/;
+        }
+        next unless $in_section;
+        if ($line =~ /^\s+(\S+)\s+(.+?)\s*$/) {
+            $cfg{$1} = $2;
+        }
+    }
+    close($fh);
+    return \%cfg;
+}
+
 __END__
 
 =head1 NAME
@@ -251,11 +383,13 @@ hitachiblock-repl - Hitachi Block Storage Replication CLI
     delete            Delete a pair
     remote-list       List remote storage systems
     remote-add        Register a remote storage system
+    orphans           Report LDEV/registry inconsistencies
 
   Options:
-    --storeid         PVE storage ID (for credentials)
+    --storeid         PVE storage ID (for credentials and config lookup)
     --pvol            Primary volume LDEV ID
     --svol            Secondary volume LDEV ID
+    --volume          PVE volume name (e.g. vm-100-disk-1); resolved to --pvol
     --remote-storage-id  Remote storage serial/device ID
     --remote-ip       Remote storage management IP
     --copy-group      Copy group name
@@ -265,13 +399,23 @@ hitachiblock-repl - Hitachi Block Storage Replication CLI
     --journal-id      Journal ID (for UR)
     --quorum-disk-id  Quorum disk ID (for GAD)
     --consistency-group  Enable consistency group
+    --auto-cleanup    (orphans) prune registry entries with no backing LDEV
+    --mgmt-ip         Override Configuration Manager IP
+    --storage-id      Override storage serial number
+    --mgmt-port       Override API port
     --json            Output in JSON format
     --help            Show this help
 
-  Environment variables:
+  Connection parameters (mgmt IP, storage ID, port) are resolved in order:
+    1. --mgmt-ip / --storage-id / --mgmt-port flags
+    2. the hitachiblock:<storeid> section of /etc/pve/storage.cfg
+    3. the HITACHI_MGMT_IP / HITACHI_STORAGE_ID / HITACHI_MGMT_PORT env vars
+
+  Environment variables (legacy fallback):
     HITACHI_MGMT_IP       Management IP of Configuration Manager
     HITACHI_STORAGE_ID    Storage system serial number
-    HITACHI_MGMT_PORT     API port (default: 443)
+    HITACHI_MGMT_PORT     API port (default: platform-specific)
+    HITACHI_STORAGE_CFG   Override path to storage.cfg (default /etc/pve/storage.cfg)
 
 =head1 EXAMPLES
 

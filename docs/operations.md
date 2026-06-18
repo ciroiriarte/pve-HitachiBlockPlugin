@@ -6,11 +6,17 @@
 
 Disks are allocated automatically when creating a VM or adding a disk in the PVE UI. The plugin:
 
-1. Creates a thin-provisioned LDEV on the configured DP pool
-2. Labels it with `pve:<storeid>:vm-<VMID>-disk-<N>`
-3. Applies QoS limits if configured
-4. Maps the LUN to the local node's host group
-5. Triggers SCSI rescan and waits for the multipath device to appear
+1. Reserves a unique volume name under a cluster-wide lock
+2. Creates a thin-provisioned LDEV on the configured DP pool
+3. Labels it with `pve:<storeid>:vm-<VMID>-disk-<N>`
+4. Applies QoS limits if configured (best-effort; a QoS failure does not fail the disk)
+5. Maps the LUN to the local node's host group
+6. Triggers SCSI rescan and waits for the multipath device to appear
+7. Commits the volume to the registry **last**, only once it is real and discoverable
+
+LUN mapping and device discovery are treated as prerequisites: if either fails the
+operation **fails loudly and rolls back** the LDEV and mapping, rather than
+leaving a registered-but-unusable "ghost" volume.
 
 ### Free a VM Disk
 
@@ -63,6 +69,9 @@ qm delsnapshot <vmid> <snapname>
 - Deletes the Thin Image pair
 - S-VOL is released back to the snapshot pool
 - Registry entry is removed
+- **Refused** if a linked clone was created from this snapshot and still depends on
+  it (the clone records its `parent_snap`); remove or fully-clone the dependent
+  first to avoid corrupting it.
 
 ### Rollback Snapshot
 
@@ -92,10 +101,18 @@ The plugin implements `volume_snapshot_info` to provide snapshot tree informatio
 ### Full Clone
 
 - Created when the clone target uses a different storage or a full copy is requested
-- Creates a temporary snapshot, copies data to a new independent LDEV, then deletes the temporary snapshot
+- Creates a new independent LDEV and performs an array-side Thin Image clone (`isClone`) with `autoSplit`, so the copy completes on the array and the result is a fully independent volume
 - Slower but produces a fully independent volume
 - No dependency on the source volume after creation
 - The `copy_speed` parameter (1-15) controls the array-side copy rate; higher values complete faster but consume more array resources
+
+### Deleting Clones and Their Sources
+
+Linked clones are Thin Image children of their source (P-VOL). The plugin records
+this relationship (`parent_volname`) and **refuses to delete a volume while linked
+clones still depend on it** — attempting to do so fails with a clear error listing
+the dependents. Delete or fully-clone the dependents first, then delete the source.
+Full clones have no such dependency and can be deleted independently.
 
 ### Clone from Snapshot
 
@@ -218,7 +235,9 @@ This is useful for rebalancing storage pools, moving workloads between tiers (e.
 
 ## Consistency Group Snapshots
 
-`volume_snapshot_consistency_group(scfg, storeid, volnames_arrayref, snap)` creates an atomic, crash-consistent snapshot across multiple volumes simultaneously. All volumes in the group are snapshotted at the same array-side point in time.
+`volume_snapshot_consistency_group(scfg, storeid, volnames_arrayref, snap)` snapshots
+multiple volumes as a single Hitachi consistency group, so the array holds them at a
+common point in time.
 
 Use cases:
 
@@ -227,10 +246,18 @@ Use cases:
 
 The plugin:
 
-1. Accepts an array reference of volume names to snapshot together
-2. Issues a single consistency group snapshot request to the array
-3. Stores snapshot metadata (S-VOL LDEV IDs, WWIDs, snapshot IDs) for each volume in the registry
-4. All volumes in the group share the same snapshot name
+1. Accepts an array reference of volume names to snapshot together (all resolved up
+   front, so a missing volume fails before any pair is created)
+2. Creates one Thin Image pair per volume, all sharing a single snapshot group with
+   `isConsistencyGroup` set so the array treats them as one CG
+3. **Rolls back** any pairs already created in the group if a later pair fails, so a
+   partial, non-crash-consistent group is never left behind
+4. Stores snapshot metadata (S-VOL LDEV IDs, WWIDs, snapshot IDs) for each volume in the registry
+5. All volumes in the group share the same snapshot name
+
+> **Note:** pairs are added to the group with one REST call each (the Configuration
+> Manager API has no single multi-volume create), so crash consistency depends on
+> the array's CG semantics for the shared group, not on a single atomic request.
 
 Individual snapshot operations (delete, rollback) can still be performed per-volume after the group snapshot is created.
 
@@ -251,15 +278,29 @@ Individual snapshot operations (delete, rollback) can still be performed per-vol
 
 The `hitachiblock-repl` command manages remote replication pairs for disaster recovery and active-active configurations.
 
-### Environment Variables
+### Connection Parameters
+
+Credentials are read from the plugin's credential store
+(`/etc/pve/priv/hitachiblock/<storeid>.creds`). The management IP, storage serial,
+and port are resolved automatically in this order:
+
+1. explicit flags: `--mgmt-ip`, `--storage-id`, `--mgmt-port`
+2. the `hitachiblock: <storeid>` section of `/etc/pve/storage.cfg` (the same source
+   the plugin uses — no extra configuration needed on a PVE node)
+3. the legacy environment variables, as a fallback:
 
 ```bash
-export HITACHI_MGMT_IP=10.0.1.100      # Configuration Manager API IP
+export HITACHI_MGMT_IP=10.0.1.100       # Configuration Manager API IP
 export HITACHI_STORAGE_ID=836000123456  # Local storage serial number
-export HITACHI_MGMT_PORT=443            # API port (optional, default 443)
+export HITACHI_MGMT_PORT=443            # API port (optional)
 ```
 
-Credentials are read from the plugin's credential store (`/etc/pve/priv/hitachiblock/`). The tool finds credentials for the matching storage ID.
+On a normal PVE node you only need `--storeid`; everything else comes from
+`storage.cfg`:
+
+```bash
+hitachiblock-repl list --storeid myarray
+```
 
 ### Remote Storage Management
 
@@ -269,11 +310,8 @@ hitachiblock-repl remote-list --storeid <storeid>
 
 # Register a new remote storage system
 hitachiblock-repl remote-add --storeid <storeid> \
-    --remote-serial 836000654321 \
-    --remote-ip 10.0.2.100 \
-    --remote-port 443 \
-    --remote-model M8 \
-    --path-group 0
+    --remote-storage-id 836000654321 \
+    --remote-ip 10.0.2.100
 ```
 
 ### TrueCopy (Synchronous Replication)
@@ -281,29 +319,13 @@ hitachiblock-repl remote-add --storeid <storeid> \
 Synchronous replication for zero RPO. Every write is committed to both local and remote arrays before acknowledgment.
 
 ```bash
-# Create a TrueCopy pair
+# Create a TrueCopy pair (use --volume vm-100-disk-1 to resolve --pvol automatically)
 hitachiblock-repl create-tc --storeid <storeid> \
-    --ldev-id 1024 \
-    --remote-serial 836000654321 \
-    --remote-ldev-id 2048 \
+    --pvol 1024 \
+    --svol 2048 \
+    --remote-storage-id 836000654321 \
     --copy-group mygroup \
-    --copy-pair mypair
-
-# Check pair status
-hitachiblock-repl status --storeid <storeid> \
-    --copy-group mygroup --copy-pair mypair
-
-# Split pair (suspend replication)
-hitachiblock-repl split --storeid <storeid> \
-    --copy-group mygroup --copy-pair mypair
-
-# Resync pair (resume replication)
-hitachiblock-repl resync --storeid <storeid> \
-    --copy-group mygroup --copy-pair mypair
-
-# Delete pair
-hitachiblock-repl delete --storeid <storeid> \
-    --copy-group mygroup --copy-pair mypair
+    --pair-name mypair
 ```
 
 ### Universal Replicator (Asynchronous Replication)
@@ -313,13 +335,12 @@ Asynchronous replication with journal-based write ordering. Provides RPO measure
 ```bash
 # Create a Universal Replicator pair
 hitachiblock-repl create-ur --storeid <storeid> \
-    --ldev-id 1024 \
-    --remote-serial 836000654321 \
-    --remote-ldev-id 2048 \
+    --pvol 1024 \
+    --svol 2048 \
+    --remote-storage-id 836000654321 \
     --copy-group mygroup \
-    --copy-pair mypair \
-    --journal-id 0 \
-    --remote-journal-id 0
+    --pair-name mypair \
+    --journal-id 0
 ```
 
 **Note**: Journal volumes must be pre-created on both arrays. See [prerequisites.md](prerequisites.md).
@@ -331,34 +352,59 @@ Active-active replication where both copies are simultaneously accessible. Provi
 ```bash
 # Create a GAD pair
 hitachiblock-repl create-gad --storeid <storeid> \
-    --ldev-id 1024 \
-    --remote-serial 836000654321 \
-    --remote-ldev-id 2048 \
+    --pvol 1024 \
+    --svol 2048 \
+    --remote-storage-id 836000654321 \
     --copy-group mygroup \
-    --copy-pair mypair \
-    --quorum-id 0
+    --pair-name mypair \
+    --quorum-disk-id 0
 ```
 
 **Note**: A quorum disk must be configured. See [prerequisites.md](prerequisites.md).
 
-### List Replication Pairs
+### Pair Status and Lifecycle
+
+`status`, `split`, `resync`, and `delete` operate on a pair by its `--pair-id`
+(as shown in the `list` output), regardless of replication type:
 
 ```bash
-# List all remote copy pairs
-hitachiblock-repl list --storeid <storeid>
-
-# JSON output
-hitachiblock-repl list --storeid <storeid> --json
+hitachiblock-repl list   --storeid <storeid>            # find the PAIR_ID
+hitachiblock-repl status --storeid <storeid> --pair-id <id>
+hitachiblock-repl split  --storeid <storeid> --pair-id <id>   # suspend
+hitachiblock-repl resync --storeid <storeid> --pair-id <id>   # resume
+hitachiblock-repl delete --storeid <storeid> --pair-id <id>
 ```
 
-### Common Operations
+`list` also accepts `--json` for scripting.
 
-All pair operations (status, split, resync, delete) use the same syntax regardless of replication type (TC/UR/GAD):
+---
+
+## Orphan Detection (CLI)
+
+The `orphans` command surfaces inconsistencies between the LDEV registry and the
+array — useful after manual array operations or recovery from a failure:
 
 ```bash
-hitachiblock-repl <command> --storeid <storeid> \
-    --copy-group <group> --copy-pair <pair>
+# Human-readable report
+hitachiblock-repl orphans --storeid <storeid>
+
+# Machine-readable
+hitachiblock-repl orphans --storeid <storeid> --json
+
+# Prune stale registry entries (registry orphans) after reviewing the report
+hitachiblock-repl orphans --storeid <storeid> --auto-cleanup
 ```
+
+It reports two categories:
+
+- **Array orphans** — LDEVs on the array carrying this storage's label prefix that
+  are not in the registry (review manually; they may hold data and are never
+  auto-deleted).
+- **Registry orphans** — registry entries whose LDEV no longer exists on the array.
+  `--auto-cleanup` removes these stale entries. This is safe because the command
+  scans **all** array LDEVs (not just one pool), so a live volume in any pool — a
+  snapshot S-VOL pool, or a pool a volume was migrated/imported into — is never
+  mistaken for an orphan.
 
 ---
 
@@ -381,9 +427,16 @@ The plugin supports live and offline VM migration between PVE cluster nodes:
 
 This ensures each LUN is mapped only to the active node, keeping the per-host LUN count low.
 
-### Multi-Attach
+Each cluster node has its own host group (per target port), so `activate_volume`
+maps the LUN into the local node's host group and `deactivate_volume` unmaps it
+from the local node's host group only. A node's map/unmap therefore never affects
+another node's access, which is what makes live migration safe: the target node
+maps the LUN before the VM starts there, and the source node unmaps it afterwards.
 
-The `activate_volume` and `deactivate_volume` operations handle concurrent multi-node mappings for scenarios where a volume needs to be accessible from multiple nodes simultaneously (e.g., during live migration overlap or shared-disk clusters). The plugin tracks the set of active nodes per volume and only unmaps the LUN when the last node deactivates it.
+> **Note:** the plugin does not maintain a cluster-wide active-node refcount; each
+> node independently maps on activate and unmaps on deactivate against its own
+> host group. During a live-migration overlap the volume is simply mapped on both
+> the source and target nodes until the source deactivates.
 
 ---
 
@@ -404,7 +457,17 @@ echo "- - -" > /sys/class/scsi_host/host0/scan
 
 # Check for the expected WWID
 # WWID format: 60060e80<serial_hex><ldev_hex><zero_padding>
+#
+# The plugin first tries this synthesized WWID, and if it does not resolve it
+# self-corrects by reading the device's real page-83 identifier from sysfs:
+for d in /sys/block/sd*/device/wwid; do echo "$d: $(cat $d)"; done
 ```
+
+If the synthesized and real WWIDs differ on your array model, the plugin persists
+the real WWID it discovers in the registry, so subsequent activate/resize/free
+operations use the correct device. A persistent mismatch usually indicates the
+NAA layout assumed by `ldev_to_wwid` does not match your model — capture the real
+WWID above and open an issue.
 
 ### LUN Mapping Issues
 
