@@ -41,9 +41,11 @@ sub plugindata {
 sub properties {
     return {
         mgmt_ip => {
-            description => "Management IP or hostname of the Configuration Manager REST"
-                . " API endpoint — the array's embedded/GUM controller (direct"
-                . " connection) or a dedicated Ops Center Configuration Manager server.",
+            description => "Management IP/hostname of the Configuration Manager REST API"
+                . " endpoint — the array's embedded/GUM controller (direct connection) or a"
+                . " dedicated Ops Center Configuration Manager server. May be a"
+                . " comma-separated list of per-controller endpoints (e.g. 'CTL1,CTL2') for"
+                . " management-plane failover; a single floating VIP needs only one entry.",
             type        => 'string',
         },
         storage_id => {

@@ -14,6 +14,9 @@ pve-storage-hitachiblock (1.2.0-1) stable; urgency=medium
   * Implemented base/template images (create_base) and volume_size_info
   * Deterministic per-LDEV port selection (replaces resettable round-robin counter)
   * Opt-in TLS verification (tls_verify/tls_ca_file); 429/Retry-After handling
+  * Management-plane redundancy: mgmt_ip accepts a comma-separated list of
+    per-controller REST endpoints with sticky failover + re-auth (data plane was
+    already redundant via multipath over target_ports)
   * Multipath: auto-whitelist LUN WWIDs (multipath -a) so devices assemble under the
     default find_multipaths strict; de-whitelist (multipath -w) on free
   * Implemented rename_volume (PVE disk reassignment: relabel LDEV + rename entry)

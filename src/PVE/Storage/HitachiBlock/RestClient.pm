@@ -23,8 +23,15 @@ sub new {
     croak "username is required"   unless $opts{username};
     croak "password is required"   unless $opts{password};
 
+    # mgmt_ip may be a comma-separated list of per-controller management endpoints
+    # (e.g. each VSP controller's GUM). We keep a "current" endpoint and fail over
+    # to the next one on a transport-level failure, re-authenticating there. A
+    # single IP (or a floating management VIP) is just a one-element list.
+    my @endpoints =
+        grep { length } map { my $h = $_; $h =~ s/^\s+|\s+$//g; $h } split(/,/, $opts{mgmt_ip});
+    croak "mgmt_ip is required" unless @endpoints;
+
     my $port = $opts{port} || 443;
-    my $base = "https://$opts{mgmt_ip}:$port/ConfigurationManager/v1/objects/storages/$opts{storage_id}";
 
     # TLS verification is opt-in: Configuration Manager ships a self-signed cert by
     # default, so verification is disabled unless the caller explicitly enables it
@@ -42,8 +49,9 @@ sub new {
     );
 
     my $self = bless {
-        base_url   => $base,
-        mgmt_ip    => $opts{mgmt_ip},
+        endpoints  => \@endpoints,
+        ep_idx     => 0,
+        mgmt_ip    => $endpoints[0],   # current active endpoint
         port       => $port,
         storage_id => $opts{storage_id},
         username   => $opts{username},
@@ -53,7 +61,54 @@ sub new {
         session_id => undef,
     }, $class;
 
+    $self->{base_url} = $self->_build_base_url();
+
     return $self;
+}
+
+sub _build_base_url {
+    my ($self) = @_;
+    return "https://$self->{mgmt_ip}:$self->{port}"
+        . "/ConfigurationManager/v1/objects/storages/$self->{storage_id}";
+}
+
+# Advance to the next management endpoint (controller). Returns false when there is
+# only one endpoint (nothing to fail over to). The session token is per-controller,
+# so it is dropped — the caller must re-authenticate against the new endpoint.
+sub _switch_endpoint {
+    my ($self) = @_;
+
+    my $n = scalar(@{$self->{endpoints}});
+    return 0 if $n < 2;
+
+    $self->{ep_idx}     = ($self->{ep_idx} + 1) % $n;
+    $self->{mgmt_ip}    = $self->{endpoints}[$self->{ep_idx}];
+    $self->{base_url}   = $self->_build_base_url();
+    $self->{token}      = undef;
+    $self->{session_id} = undef;
+
+    return 1;
+}
+
+# A response LWP synthesized for a connect/timeout/DNS failure (vs. a real HTTP
+# status from the controller) is marked "Client-Warning: Internal response".
+sub _is_transport_error {
+    my ($self, $res) = @_;
+    return 0 unless $res;
+    return ($res->header('Client-Warning') // '') eq 'Internal response' ? 1 : 0;
+}
+
+# Rewrite the scheme+authority of an absolute URL to the current endpoint, so a
+# request built for a now-failed controller is re-targeted at the survivor.
+sub _rewrite_host {
+    my ($self, $url) = @_;
+    $url =~ s{^https?://[^/]+}{https://$self->{mgmt_ip}:$self->{port}};
+    return $url;
+}
+
+sub _sessions_url {
+    my ($self) = @_;
+    return "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/sessions";
 }
 
 # ── Session Management ──
@@ -61,15 +116,19 @@ sub new {
 sub login {
     my ($self) = @_;
 
-    my $url = "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/sessions";
-
     # Session creation is on the critical path for activate_storage/on_add_hook, so
     # it gets the same transient-error handling as _request: retry on rate limits
     # (429) and 5xx, honoring Retry-After. These codes mean the request was not
-    # processed, so retrying cannot create duplicate sessions.
-    my $retries = 0;
+    # processed, so retrying cannot create duplicate sessions. A transport-level
+    # failure (controller unreachable) fails over to the next endpoint and retries
+    # there, so login succeeds as long as any controller's GUM is up.
+    my $retries  = 0;
+    my $tried    = 0;
+    my $max_ep   = scalar(@{$self->{endpoints}});
+    my $last_err = '';
+
     while (1) {
-        my $req = HTTP::Request->new('POST', $url);
+        my $req = HTTP::Request->new('POST', $self->_sessions_url());
         $req->header('Content-Type'  => 'application/json');
         $req->header('Accept'        => 'application/json');
         $req->authorization_basic($self->{username}, $self->{password});
@@ -84,6 +143,13 @@ sub login {
             return $self->{token};
         }
 
+        $last_err = $res->status_line . " " . ($res->content || '');
+
+        # Controller unreachable → try the next endpoint (bounded by endpoint count).
+        if ($self->_is_transport_error($res) && ++$tried < $max_ep && $self->_switch_endpoint()) {
+            next;
+        }
+
         my $code = $res->code;
         if (($code == 429 || $code >= 500) && $retries < $MAX_RETRIES) {
             $retries++;
@@ -95,8 +161,10 @@ sub login {
             next;
         }
 
-        croak "Login failed: " . $res->status_line . " " . $res->content;
+        last;
     }
+
+    croak "Login failed (endpoints: " . join(',', @{$self->{endpoints}}) . "): $last_err";
 }
 
 sub logout {
@@ -660,7 +728,8 @@ sub _request {
     }
 
     my $res;
-    my $retries = 0;
+    my $retries   = 0;
+    my $failovers = 0;
 
     while ($retries <= $MAX_RETRIES) {
         $res = $self->{ua}->request($req);
@@ -684,6 +753,23 @@ sub _request {
         }
 
         my $code = $res->code;
+
+        # Transport-level failure (controller/GUM unreachable) → fail over to the
+        # next management endpoint, re-authenticate there, re-target the request at
+        # the survivor, and retry. Bounded by the number of endpoints. Skipped for
+        # single-endpoint configs and for best-effort calls that opt out of reauth
+        # (e.g. logout).
+        if ($self->_is_transport_error($res)
+            && $self->{username} && !$skip_reauth
+            && $failovers < scalar(@{$self->{endpoints}})
+            && $self->_switch_endpoint()) {
+            $failovers++;
+            $self->login();   # croaks only if NO controller is reachable
+            $url = $self->_rewrite_host($url);
+            $req->uri($url);
+            $req->header('Authorization' => "Session $self->{token}") if $self->{token};
+            next;
+        }
 
         # 401 Unauthorized - re-authenticate once
         if ($code == 401 && !$skip_reauth && $self->{username}) {

@@ -75,6 +75,15 @@ subtest 'validate_config' => sub {
 
     eval { PVE::Storage::HitachiBlock::Config->validate_config({ %$valid, ldev_range => 'bad' }) };
     like($@, qr/ldev_range must be/, 'invalid ldev_range caught');
+
+    # mgmt_ip accepts a comma-separated list of per-controller endpoints.
+    ok(PVE::Storage::HitachiBlock::Config->validate_config(
+        { %$valid, mgmt_ip => '10.0.1.100, 10.0.1.101' }),
+       'comma-separated mgmt_ip list is valid');
+
+    eval { PVE::Storage::HitachiBlock::Config->validate_config(
+        { %$valid, mgmt_ip => '10.0.1.100, bad host!' }) };
+    like($@, qr/is not a valid IP address or hostname/, 'invalid endpoint in list caught');
 };
 
 # ── Registry Operations (with temp dir) ──

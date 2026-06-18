@@ -76,6 +76,13 @@ PVE plugin-contract findings). No features were removed.
 - **`volume_size_info`:** reports size directly from the registry/array for raw
   block volumes (no `qemu-img` shelling).
 - **TLS verification:** opt-in `tls_verify` and `tls_ca_file` storage properties.
+- **Management-plane controller redundancy:** `mgmt_ip` now accepts a
+  comma-separated list of per-controller REST endpoints (e.g. each VSP controller's
+  GUM). The client keeps a sticky current endpoint and, on a transport-level failure,
+  fails over to the next one and re-authenticates there (sessions are per-controller).
+  A single IP / floating VIP is just a one-element list and behaves as before. (The
+  data plane was already redundant via multipath over `target_ports` on both
+  controllers.)
 - **Disk reassignment:** implemented the PVE `rename_volume` method (GUI "Reassign",
   `qm disk reassign`) — relabels the LDEV and renames the registry entry atomically,
   refusing when linked clones still depend on the source.

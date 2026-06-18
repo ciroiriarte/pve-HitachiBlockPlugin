@@ -50,7 +50,7 @@ hitachiblock: myarray
 
 | Parameter | Description |
 |-----------|-------------|
-| `mgmt_ip` | Management IP/hostname of the Configuration Manager REST API endpoint — the array's embedded/GUM controller (direct connection) or a dedicated Ops Center Configuration Manager server |
+| `mgmt_ip` | Management IP/hostname of the Configuration Manager REST API endpoint — the array's embedded/GUM controller (direct connection) or a dedicated Ops Center Configuration Manager server. May be a **comma-separated list** of per-controller endpoints for management-plane failover (see [Management Endpoint Redundancy](#management-endpoint-redundancy)) |
 | `storage_id` | Storage device ID (`storageDeviceId`), e.g. the 12-digit model+serial id returned by `GET /v1/objects/storages` (e.g., `836000123456`) — not the bare serial number |
 | `pool_id` | DP pool ID for LDEV allocation (numeric) |
 | `target_ports` | Comma-separated FC port IDs for LUN mapping (e.g., `CL1-A,CL2-A`) |
@@ -169,6 +169,36 @@ The plugin maintains a REST API session with the Configuration Manager:
 - The session is kept alive via periodic keepalive calls
 - If a keepalive fails (session expired), the plugin automatically re-authenticates
 - The session is released on `deactivate_storage()` (logout)
+
+## Management Endpoint Redundancy
+
+VSP arrays have two controllers for redundancy. This affects two independent
+planes:
+
+- **Data plane (I/O):** already redundant. List target ports from *both*
+  controllers in `target_ports` (e.g. `CL1-A` on CTL1 and `CL2-A` on CTL2); the
+  host's multipath stack fails over between paths automatically. No special
+  configuration beyond listing the ports.
+- **Management plane (REST API):** depends on how your array exposes management.
+  - **Single floating management VIP** (the array fails the IP over between
+    controllers internally): set `mgmt_ip` to that one VIP — failover is handled by
+    the array, nothing else to do.
+  - **Per-controller management IPs** (typical for VSP E series embedded GUM, where
+    each controller serves its own REST endpoint): set `mgmt_ip` to a
+    **comma-separated list**, e.g. `mgmt_ip 10.0.1.100,10.0.1.101`.
+
+When `mgmt_ip` lists multiple endpoints, the plugin keeps a *current* endpoint and,
+on a transport-level failure (controller/GUM unreachable, connection timeout), fails
+over to the next one and **re-authenticates** there (REST sessions are
+per-controller). It stays on the working endpoint ("sticky") until that one fails.
+A single management call that is in-flight when a controller dies will fail and is
+retried by the normal operation path against the survivor.
+
+> **Note:** an async array job (LDEV create, snapshot, etc.) lives on the controller
+> that started it. If that controller dies mid-operation the job is lost; the plugin
+> surfaces the failure (and rolls back any partial array-side resources) rather than
+> silently polling a controller that never had the job. Re-running the operation
+> proceeds on the surviving controller.
 
 ## File Locations
 

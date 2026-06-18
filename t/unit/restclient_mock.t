@@ -603,4 +603,72 @@ subtest 'request_reauth_on_401' => sub {
     is($client->{token}, 'new', 'token refreshed by re-login');
 };
 
+# ── Multi-controller management endpoints / failover ──
+
+subtest 'parses_multiple_endpoints' => sub {
+    my $c = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => ' 10.0.0.1 , 10.0.0.2 ', storage_id => '123',
+        username => 'u', password => 'p', port => 443);
+    is_deeply($c->{endpoints}, ['10.0.0.1', '10.0.0.2'], 'endpoints parsed and trimmed');
+    is($c->{mgmt_ip}, '10.0.0.1', 'current endpoint is the first');
+    like($c->{base_url}, qr{^https://10\.0\.0\.1:443/}, 'base_url uses the first endpoint');
+};
+
+subtest 'switch_endpoint' => sub {
+    my $c = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => 'a,b', storage_id => '123', username => 'u', password => 'p');
+    $c->{token} = 'tok';
+    $c->{session_id} = 's';
+
+    ok($c->_switch_endpoint(), 'switch returns true with two endpoints');
+    is($c->{mgmt_ip}, 'b', 'advanced to the second endpoint');
+    is($c->{token}, undef, 'token cleared on switch (session is per-controller)');
+    like($c->{base_url}, qr{^https://b:}, 'base_url updated to the new endpoint');
+
+    ok($c->_switch_endpoint(), 'wraps around');
+    is($c->{mgmt_ip}, 'a', 'wrapped back to the first endpoint');
+
+    my $single = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => 'only', storage_id => '1', username => 'u', password => 'p');
+    is($single->_switch_endpoint(), 0, 'single endpoint: nothing to fail over to');
+};
+
+subtest 'login_fails_over_on_transport_error' => sub {
+    my $c = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => 'ctl1,ctl2', storage_id => '1', username => 'u', password => 'p');
+
+    # LWP marks connect/timeout failures with Client-Warning: Internal response.
+    my $internal = HTTP::Response->new(500, 'Cannot connect',
+        ['Client-Warning' => 'Internal response'], '');
+    my $ok = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"token":"t2","sessionId":"s2"}');
+    $c->{ua} = FakeUA->new([$internal, $ok]);
+
+    my $tok = $c->login();
+    is($tok, 't2', 'logged in after failing over to the second controller');
+    is($c->{mgmt_ip}, 'ctl2', 'now using the second controller');
+};
+
+subtest 'request_fails_over_on_transport_error' => sub {
+    my $c = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => 'ctl1,ctl2', storage_id => '1', username => 'u', password => 'p');
+    $c->{token} = 'old';
+
+    my $internal = HTTP::Response->new(500, 'Cannot connect',
+        ['Client-Warning' => 'Internal response'], '');
+    my $login = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"token":"t2","sessionId":"s2"}');
+    my $ok = HTTP::Response->new(200, 'OK',
+        ['Content-Type' => 'application/json'], '{"done":1}');
+    # ctl1 request transport-fails -> switch to ctl2 -> login() consumes $login ->
+    # retried request consumes $ok.
+    $c->{ua} = FakeUA->new([$internal, $login, $ok]);
+
+    my $out = $c->_request('GET',
+        'https://ctl1:443/ConfigurationManager/v1/objects/storages/1/pools');
+    is($out->{done}, 1, 'request succeeded after failover + re-auth');
+    is($c->{mgmt_ip}, 'ctl2', 'switched to the surviving controller');
+    is($c->{token}, 't2', 're-authenticated on the new controller');
+};
+
 done_testing();

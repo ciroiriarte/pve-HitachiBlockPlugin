@@ -34,8 +34,10 @@ hitachiblock: myarray
 
 # VSP E series example (e.g. E590H) — embedded/direct Configuration Manager REST
 # API on the controller GUM (port 443). storage_id is the 12-digit storageDeviceId.
+# mgmt_ip lists BOTH controllers' GUM IPs for management-plane failover (use a
+# single IP/VIP instead if your array presents one floating management address).
 # hitachiblock: vspe-array
-#     mgmt_ip 10.0.1.210
+#     mgmt_ip 10.0.1.210,10.0.1.211
 #     storage_id 716000123456
 #     pool_id 0
 #     snap_pool_id 1

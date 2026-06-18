@@ -477,8 +477,16 @@ sub validate_config {
     push @errors, "pool_id is required"    unless defined $config->{pool_id};
     push @errors, "target_ports is required" unless $config->{target_ports};
 
-    if ($config->{mgmt_ip} && $config->{mgmt_ip} !~ /^[\d.]+$/ && $config->{mgmt_ip} !~ /^[a-zA-Z0-9._-]+$/) {
-        push @errors, "mgmt_ip must be a valid IP address or hostname";
+    # mgmt_ip may be a comma-separated list of per-controller endpoints; validate
+    # each entry as an IP address or hostname.
+    if ($config->{mgmt_ip}) {
+        my @hosts = grep { length } map { s/^\s+|\s+$//gr } split(/,/, $config->{mgmt_ip});
+        push @errors, "mgmt_ip must contain at least one IP address or hostname"
+            unless @hosts;
+        for my $h (@hosts) {
+            next if $h =~ /^[\d.]+$/ || $h =~ /^[a-zA-Z0-9._-]+$/;
+            push @errors, "mgmt_ip entry '$h' is not a valid IP address or hostname";
+        }
     }
 
     if (defined $config->{pool_id} && $config->{pool_id} !~ /^\d+$/) {
