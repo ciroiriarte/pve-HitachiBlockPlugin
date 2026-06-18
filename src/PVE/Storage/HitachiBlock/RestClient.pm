@@ -414,8 +414,10 @@ sub create_snapshot {
     croak "pvol_ldev_id is required"   unless defined $opts{pvol_ldev_id};
     croak "snap_pool_id is required"   unless defined $opts{snap_pool_id};
 
-    # autoSplit defaults on (snapshots), but a CoW linked clone must keep the pair
-    # un-split so the S-VOL shares blocks with the P-VOL via copy-on-write.
+    # autoSplit=true splits the pair right after creation so the S-VOL becomes host
+    # R/W-accessible (PSUS) while still sharing unchanged blocks with the P-VOL via
+    # the pool (copy-on-write). Default on; pass auto_split=0 only to leave the pair
+    # un-split (reference-only S-VOL). NOTE: must NOT be combined with isClone=true.
     my $auto_split = (exists $opts{auto_split} && !$opts{auto_split}) ? JSON::false : JSON::true;
 
     my $body = {

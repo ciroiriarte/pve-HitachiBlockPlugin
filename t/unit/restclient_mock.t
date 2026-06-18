@@ -205,22 +205,35 @@ subtest 'create_snapshot_with_auto_split' => sub {
     ok($log[0]{body}{autoSplit}, 'auto split enabled');
 };
 
-subtest 'create_snapshot_linked_clone_no_autosplit' => sub {
+subtest 'create_snapshot_auto_split_option' => sub {
+    # A CoW linked clone pairs an explicit S-VOL with auto_split=1: the pair splits so
+    # the S-VOL is host R/W (PSUS) while still sharing blocks with the P-VOL.
     my $client = new_mock_client();
     MockRestClient::set_mock_responses({});
-
-    # A CoW linked clone pairs an explicit S-VOL and must NOT auto-split.
     $client->create_snapshot(
         pvol_ldev_id   => 42,
         snap_pool_id   => 1,
         svol_ldev_id   => 100,
         snapshot_group => 'pve_lclone_x',
-        auto_split     => 0,
+        auto_split     => 1,
     );
-
     my @log = MockRestClient::get_request_log();
-    ok(!$log[0]{body}{autoSplit}, 'auto_split=0 => autoSplit false (stays CoW-linked)');
+    ok($log[0]{body}{autoSplit}, 'auto_split=1 => autoSplit true (split PSUS, host-R/W CoW S-VOL)');
     is($log[0]{body}{svolLdevId}, 100, 'explicit S-VOL in body');
+
+    # Default (omitted) is also true.
+    MockRestClient::clear_request_log();
+    MockRestClient::set_mock_responses({});
+    $client->create_snapshot(pvol_ldev_id => 42, snap_pool_id => 1, snapshot_group => 'g');
+    @log = MockRestClient::get_request_log();
+    ok($log[0]{body}{autoSplit}, 'autoSplit defaults true');
+
+    # Explicit 0 leaves the pair un-split (reference-only S-VOL).
+    MockRestClient::clear_request_log();
+    MockRestClient::set_mock_responses({});
+    $client->create_snapshot(pvol_ldev_id => 42, snap_pool_id => 1, snapshot_group => 'g', auto_split => 0);
+    @log = MockRestClient::get_request_log();
+    ok(!$log[0]{body}{autoSplit}, 'auto_split=0 => autoSplit false');
 };
 
 subtest 'restore_snapshot_sends_action' => sub {

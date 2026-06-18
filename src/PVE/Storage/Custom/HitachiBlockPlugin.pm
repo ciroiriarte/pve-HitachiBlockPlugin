@@ -362,7 +362,7 @@ sub alloc_image {
         $class->_map_lun_to_local($storeid, $scfg, $client, $ldev_id);
 
         my $synth = $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
-        my ($wwid) = $class->_resolve_wwid($multipath, $ldev_id, $synth);
+        my ($wwid) = $class->_resolve_wwid($client, $multipath, $ldev_id, $synth);
 
         # Commit to the registry LAST, once the volume is real and discoverable.
         $config->register_ldev($name, $ldev_id,
@@ -877,7 +877,6 @@ sub clone_image {
     my $new_name = $config->reserve_volname($vmid);
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
     my $size_mb = $src_meta->{size_mb} || 1;
-    my $copy_speed = $scfg->{copy_speed};
 
     my $new_ldev_id;
     my $committed = 0;
@@ -891,16 +890,18 @@ sub clone_image {
         $new_ldev_id = $result->{resourceId}
             or die "Failed to create S-VOL for linked clone\n";
 
-        # Thin Image pair WITHOUT auto-split: the S-VOL stays linked to the P-VOL via
-        # copy-on-write (instant, space-efficient). autoSplit/isClone would instead
-        # produce a full independent copy.
+        # Split Thin Image pair (autoSplit=true): the pair is created and split so the
+        # S-VOL becomes host R/W-accessible (status PSUS) while STILL sharing unchanged
+        # blocks with the source via the pool — a persistent copy-on-write linked
+        # clone. Per the REST API guide, `isClone` (which we never set) is the opposite:
+        # it full-copies then auto-deletes the pair, yielding a standalone full clone.
+        # An *un-split* pair's S-VOL is only "reference available", not host R/W.
         $client->create_snapshot(
             pvol_ldev_id   => $clone_source_ldev,
             svol_ldev_id   => $new_ldev_id,
             snap_pool_id   => $snap_pool_id,
             snapshot_group => "pve_lclone_${storeid}_${new_ldev_id}",
-            auto_split     => 0,
-            ($copy_speed ? (copy_speed => $copy_speed) : ()),
+            auto_split     => 1,
         );
 
         # Label (prerequisite for orphan detection)
@@ -911,7 +912,7 @@ sub clone_image {
         $class->_map_lun_to_local($storeid, $scfg, $client, $new_ldev_id);
 
         my $synth = $multipath->ldev_to_wwid($scfg->{storage_id}, $new_ldev_id);
-        my ($wwid) = $class->_resolve_wwid($multipath, $new_ldev_id, $synth);
+        my ($wwid) = $class->_resolve_wwid($client, $multipath, $new_ldev_id, $synth);
 
         # Commit LAST. Record the source volume (and snapshot, when applicable) so the
         # source cannot be deleted while this linked clone still shares its blocks.
@@ -1299,13 +1300,31 @@ sub _ldev_size_mb {
 # not resolve, self-corrects by reading the actual page-83 identifier from sysfs.
 # Returns ($wwid, $path); croaks if no device appears (fatal for the caller).
 sub _resolve_wwid {
-    my ($class, $multipath, $ldev_id, $synth_wwid) = @_;
+    my ($class, $client, $multipath, $ldev_id, $synth_wwid) = @_;
 
     $multipath->rescan_scsi_hosts();
 
+    # Authoritative: once the LDEV has an LU path, the array reports its real NAA id
+    # (GET /ldevs/{id} -> naaId). Prefer it over the synthesized WWID, whose exact
+    # byte layout is model-dependent. Best-effort — fall back if absent/unmapped.
+    my $array_wwid = eval {
+        my $ldev = $client->get_ldev($ldev_id);
+        my $naa = $ldev->{naaId};
+        return undef unless defined $naa && length $naa;
+        $naa =~ s/^naa\.//i;
+        $naa =~ s/^0x//i;
+        return lc($naa);
+    };
+    if ($array_wwid) {
+        my $apath = eval { $multipath->wait_for_device($array_wwid) };
+        return ($array_wwid, $apath) if $apath;
+    }
+
+    # Fallback 1: synthesized NAA (fast path on matching models).
     my $path = eval { $multipath->wait_for_device($synth_wwid, 20) };
     return ($synth_wwid, $path) if $path;
 
+    # Fallback 2: discover the real page-83 id from sysfs.
     my $real = $multipath->discover_wwid($ldev_id);
     if ($real && $real ne $synth_wwid) {
         my $rpath = $multipath->wait_for_device($real);
@@ -1527,7 +1546,7 @@ sub manage_volume {
         $class->_map_lun_to_local($storeid, $scfg, $client, $ldev_id);
 
         my $synth = $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
-        my ($wwid) = $class->_resolve_wwid($multipath, $ldev_id, $synth);
+        my ($wwid) = $class->_resolve_wwid($client, $multipath, $ldev_id, $synth);
 
         # Commit to the registry LAST.
         $config->register_ldev($name, $ldev_id,

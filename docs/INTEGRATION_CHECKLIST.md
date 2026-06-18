@@ -30,6 +30,42 @@ AUTH="Authorization: Session $TOK"
 
 ---
 
+## Reference-doc findings (spec-confirmed, still verify behaviour on hardware)
+
+Extracted from the vendor docs under `reference/` (see `docs/reference/*.md`). These
+move several assumptions from "guess" to "confirmed by spec" — but spec ≠ the specific
+E590H microcode, so the hardware checks below still apply.
+
+- **CoW linked clone = `autoSplit=true`, `isClone` unset** (REST API guide pp. 508–513).
+  A split Thin Image pair leaves the S-VOL in `PSUS`: **host R/W and still sharing
+  unchanged blocks** with the P-VOL via the pool. `isClone=true` is the opposite (full
+  copy then auto-delete the pair). **Code corrected** (`clone_image` now uses
+  `auto_split => 1`; an earlier commit wrongly used `0`, which leaves an un-split,
+  non-R/W S-VOL). → Phase 4.2.
+- **`byteFormatCapacity` is base-1024** (`"1G"` = 1 GiB); `blockCapacity` = 512-byte
+  block count for exact sizing. Our `"<MB>M"` is therefore MiB and round-trips
+  correctly — but switching create/expand to `blockCapacity`/`additionalBlockCapacity`
+  would remove rounding ambiguity (recommended improvement). → Phase 2.1.
+- **Pool capacities are in MB = MiB (base-1024)** — `status()`'s `*1024*1024` is correct.
+  BUT the documented free-space field is **`availableVolumeCapacity`**; confirm whether
+  `usedPoolCapacity` (what the code reads) is also returned, or switch to
+  `totalPoolCapacity - availableVolumeCapacity`. → Phase 2.4.
+- **LDEV `label` max = 32 chars** (confirmed) → our `$MAX_LABEL_LEN = 32` is right.
+- **WWID/NAA:** the array returns the real `naaId` on **`GET /ldevs/{id}`** (not on
+  `/luns`); the Linux multipath WWID is `3` + `naaId`. **Code improved** to read
+  `naaId` from the array (with the synth/sysfs path as fallback). → Phase 3.2.
+- **Async jobs:** `jobId` + `self` link in the 202 body; poll `GET /jobs/{id}`;
+  `state` ∈ Queued/Started/StorageAccepted/Succeeded/Failed/Unknown; new resource id in
+  `affectedResources[0]` (no `operationDetails[].resourceId`). Our `_wait_for_job`
+  matches; the speculative `Location`-header branch is harmless (doc shows body `jobId`).
+- **Snapshot S-VOL allocation:** a Thin Image pair may be created **without** an S-VOL
+  (snapshot-data-only); an S-VOL is assigned later for read access. Our
+  `volume_snapshot` creates a pair without an explicit S-VOL and then reads
+  `svolLdevId` from it — verify the array returns/allocates one, or allocate the S-VOL
+  explicitly. → Phase 4.1.
+
+---
+
 ## Phase 0 — API reachability & identity
 
 ### 0.1 REST API base path / version

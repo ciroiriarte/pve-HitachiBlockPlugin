@@ -77,12 +77,18 @@ PVE plugin-contract findings). No features were removed.
   block volumes (no `qemu-img` shelling).
 - **TLS verification:** opt-in `tls_verify` and `tls_ca_file` storage properties.
 - **True CoW linked clones:** `clone_image` now creates a copy-on-write Thin Image
-  S-VOL (Thin Image pair *without* `autoSplit`) that shares blocks with its source,
-  instead of a full physical copy. Sources are restricted to base images and
-  snapshots (`volume_has_feature('clone')` => `base`/`snap`), matching the block
-  storage model; full copies are handled by PVE core via the device path. Linked
-  clones are space-efficient and instant, and the source/snapshot cannot be deleted
-  while a clone depends on it.
+  S-VOL that shares blocks with its source, instead of a full physical copy. Per the
+  REST API guide the pair is created **split** (`autoSplit=true`, `isClone` unset) so
+  the S-VOL is host R/W (status `PSUS`) while still sharing unchanged blocks via the
+  pool; `isClone=true` would full-copy then auto-delete the pair (a full clone).
+  Sources are restricted to base images and snapshots (`volume_has_feature('clone')`
+  => `base`/`snap`), matching the block storage model; full copies are handled by PVE
+  core via the device path. The source/snapshot cannot be deleted while a clone
+  depends on it.
+- **Authoritative device WWID:** `_resolve_wwid` now reads the array-reported `naaId`
+  from `GET /ldevs/{id}` and uses `3<naaId>` for the multipath device, instead of
+  relying on a model-dependent synthesized NAA (synthesis + sysfs discovery remain as
+  fallbacks).
 - **`volume_has_feature` block model:** reworked to the LVM-thin `base`/`current`/`snap`
   key model so PVE offers linked-clone only where it is valid and exposes `rename`.
 - **`map_volume`/`unmap_volume`:** implemented the PVE 8 explicit map/unmap hooks
@@ -126,6 +132,12 @@ PVE plugin-contract findings). No features were removed.
   401 re-auth).
 
 ### Documentation
+- Added `docs/reference/` Markdown extracts of the vendor PDFs in `reference/`
+  (REST API Reference Guide, VSP 5000 User Guide, Ops Center Common Services),
+  focused on the resources/semantics this plugin uses. These confirmed several
+  assumptions from the spec (linked-clone `autoSplit`/`isClone`, base-1024 capacity
+  units, 32-char LDEV labels, `naaId` source, async job format) and drove the
+  `clone_image` and WWID corrections above.
 - Added `docs/INTEGRATION_CHECKLIST.md`: a phased hardware bring-up checklist (VSP
   E590H) enumerating every array/host assumption, where it lives in the code, how to
   verify it, and what to change if wrong — plus a `t/integration/` README tying the
