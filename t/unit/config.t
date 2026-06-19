@@ -398,21 +398,21 @@ subtest 'find_snapshot_dependents' => sub {
 };
 
 # ── Cluster lock branch wiring ──
-# The cluster path (cfs_lock_storage) is normally skipped in tests because the
-# registry lives in a tempdir. Force it on and stub PVE::Cluster to prove the
-# storage lock primitive is invoked with the right id and the arrayref
-# read-modify-write contract round-trips correctly.
+# The cluster path is normally skipped in tests because the registry lives in a
+# tempdir. Force it on and stub PVE::Cluster to prove the registry uses a DEDICATED
+# lock domain (cfs_lock_domain), NOT cfs_lock_storage — the latter would self-deadlock
+# against PVE core's own storage lock around vdisk_alloc/free/activate.
 
-subtest 'cluster_lock_uses_cfs_lock_storage' => sub {
+subtest 'cluster_lock_uses_dedicated_domain' => sub {
     my $tmpdir = tempdir(CLEANUP => 1);
 
     my @lock_calls;
     no warnings 'redefine', 'once';
-    # Stub the upstream primitive: record the lock id and run the critical section,
-    # mirroring cfs_lock_storage (returns the coderef's value, leaves $@ clear).
-    local *PVE::Cluster::cfs_lock_storage = sub {
-        my ($storeid, $timeout, $code, @param) = @_;
-        push @lock_calls, $storeid;
+    # Stub the upstream primitive: record the lock domain and run the critical
+    # section, mirroring cfs_lock_domain (returns the coderef's value, $@ clear).
+    local *PVE::Cluster::cfs_lock_domain = sub {
+        my ($domain, $timeout, $code, @param) = @_;
+        push @lock_calls, $domain;
         return $code->(@param);
     };
     local *PVE::Storage::HitachiBlock::Config::_registry_file = sub { "$tmpdir/cl.json" };
@@ -422,8 +422,8 @@ subtest 'cluster_lock_uses_cfs_lock_storage' => sub {
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => 'clstore');
     $config->register_ldev('vm-7-disk-1', 71, size_mb => 64);
 
-    is_deeply(\@lock_calls, ['clstore'],
-        'register_ldev acquired cfs_lock_storage for storage-clstore');
+    is_deeply(\@lock_calls, ['hitachiblock-registry-clstore'],
+        'registry uses a dedicated lock domain, not the PVE storage lock');
 
     # The write inside the critical section persisted, and a scalar-context lookup
     # through the same locked path returns correctly (arrayref unwrap works).
