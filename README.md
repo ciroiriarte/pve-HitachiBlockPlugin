@@ -5,6 +5,8 @@ block storage (VSP One Block, VSP E series, and VSP G series). It provisions
 **one LUN per virtual disk** and offloads storage services — snapshots, clones,
 thin provisioning, QoS, replication — to the array, in the spirit of VMware vVols.
 
+[![OBS build (PVE 9)](https://build.opensuse.org/projects/home:ciriarte:pve-HitachiBlockPlugin/packages/pve-storage-hitachiblock/badge.svg?type=default)](https://build.opensuse.org/package/show/home:ciriarte:pve-HitachiBlockPlugin/pve-storage-hitachiblock)
+
 > ### ⚠️ Project status: pre-production, not yet hardware-validated
 >
 > This plugin was developed against the Hitachi Configuration Manager REST API
@@ -75,8 +77,25 @@ Full host- and array-side prerequisites:
 
 ## Quick start
 
+Install from the [OBS](https://build.opensuse.org/package/show/home:ciriarte:pve-HitachiBlockPlugin/pve-storage-hitachiblock)
+repository on each PVE 9 node (Debian 13 / Trixie base):
+
 ```bash
-# Build and install on each PVE node
+echo 'deb http://download.opensuse.org/repositories/home:/ciriarte:/pve-HitachiBlockPlugin/PVE_9/ /' \
+  > /etc/apt/sources.list.d/hitachiblock.list
+curl -fsSL 'https://download.opensuse.org/repositories/home:/ciriarte:/pve-HitachiBlockPlugin/PVE_9/Release.key' \
+  | gpg --dearmor > /etc/apt/trusted.gpg.d/home_ciriarte_hitachiblock.gpg
+apt update && apt install pve-storage-hitachiblock
+systemctl restart pvedaemon
+```
+
+> The repository is named `PVE_9` after the Proxmox release (not the Debian base).
+> It currently ships an **alpha** build — see the status note above and
+> [`docs/packaging-obs.md`](docs/packaging-obs.md) for packaging details.
+
+Or build and install from source on each node:
+
+```bash
 make install          # or: make deb && dpkg -i ../pve-storage-hitachiblock_*_all.deb
 systemctl restart pvedaemon
 ```
