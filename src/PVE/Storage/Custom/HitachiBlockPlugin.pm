@@ -498,7 +498,20 @@ sub free_image {
                     ldev_id           => $ldev_id,
                 );
                 for my $lun (@$luns) {
-                    $client->unmap_lun($lun->{lunId}) if defined $lun->{lunId};
+                    my $lun_id = $lun->{lunId};
+                    next unless defined $lun_id;
+                    # Right after the host paths are deleted the array can still
+                    # report "the LU is executing host I/O" for a few seconds;
+                    # retry that case with backoff (other errors propagate).
+                    my $ok = 0;
+                    for my $try (1 .. 6) {
+                        $ok = eval { $client->unmap_lun($lun_id); 1 };
+                        last if $ok;
+                        die $@ unless ($@ // '') =~ /host I\/?O/i;
+                        sleep 3;
+                    }
+                    die "LUN $lun_id unmap blocked by host I/O after retries\n"
+                        unless $ok;
                 }
             }
         }
