@@ -17,6 +17,14 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 OUT="$ROOT/build/obs"
 
+# Tarballs come from `git archive HEAD`, but the version is read from the
+# working tree; a dirty tree would desync the .dsc from debian/changelog
+# inside debian.tar (OBS would then look for the wrong orig tarball).
+if ! git diff --quiet HEAD -- debian version.mk; then
+  echo "error: uncommitted changes to debian/ or version.mk; commit first" >&2
+  exit 1
+fi
+
 # --- derive identifiers ----------------------------------------------------
 PKG="$(sed -n '1s/^\([a-z0-9.+-]*\) .*/\1/p' debian/changelog)"
 FULLVER="$(sed -n '1s/^[^(]*(\([^)]*\)).*/\1/p' debian/changelog)"   # e.g. 1.2.0-1
