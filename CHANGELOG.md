@@ -1,6 +1,11 @@
 # Changelog
 
-## [1.2.0] - 2026-06-17
+## [1.2.0~alpha1] - 2026-06-17
+
+> **Alpha pre-release** — not yet validated against a live array or cluster.
+> The `~alpha1` suffix sorts below a future stable `1.2.0`. Not for production
+> data until verified on hardware (see `docs/INTEGRATION_CHECKLIST.md`).
+
 
 Hardening release addressing a multi-model review (correctness, data-safety, and
 PVE plugin-contract findings). No features were removed.
