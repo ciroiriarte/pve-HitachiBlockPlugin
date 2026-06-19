@@ -1,0 +1,3 @@
+# Project build config for home:ciriarte:pve-HitachiBlockPlugin
+# Debian source package build; publish an apt-consumable repository.
+Repotype: debian

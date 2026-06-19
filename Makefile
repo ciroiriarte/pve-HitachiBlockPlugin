@@ -10,7 +10,7 @@ MODULES=$(wildcard $(MODULE_DIR)/*.pm)
 
 CONF_FILES=conf/storage.cfg.example conf/multipath.conf.d/hitachiblock-vsp.conf
 
-.PHONY: all install clean deb test
+.PHONY: all install clean deb test obs-source
 
 all:
 	@echo "$(PACKAGE) $(VERSION) - nothing to build (pure Perl)"
@@ -36,7 +36,11 @@ test:
 	prove -Isrc -r t/unit/
 
 clean:
-	@echo "Nothing to clean"
+	rm -rf build/
 
 deb:
 	dpkg-buildpackage -us -uc -b
+
+# Debian "3.0 (quilt)" source package for OBS (no dpkg-dev required)
+obs-source:
+	tools/make-obs-source.sh

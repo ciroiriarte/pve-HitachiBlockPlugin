@@ -1,0 +1,19 @@
+<project name="home:ciriarte:pve-HitachiBlockPlugin">
+  <title>Proxmox VE storage plugin for Hitachi block storage (ALPHA)</title>
+  <description>
+    Storage plugin for Proxmox VE that integrates with Hitachi FC-based block
+    storage (VSP One Block, VSP E series, VSP G series). One LUN per virtual
+    disk with array-offloaded snapshots, clones, and online resize.
+
+    ALPHA: not yet validated against a live array or cluster. Lab/test use only
+    until verified on real hardware (see docs/INTEGRATION_CHECKLIST.md).
+
+    The repository is named after the Proxmox VE release (PVE_9) rather than the
+    Debian base (Debian 13 / Trixie) to avoid confusion.
+  </description>
+  <person userid="ciriarte" role="maintainer"/>
+  <repository name="PVE_9">
+    <path project="Debian:13" repository="standard"/>
+    <arch>x86_64</arch>
+  </repository>
+</project>

@@ -18,3 +18,6 @@ Description: Proxmox VE storage plugin for Hitachi block storage
  block storage systems (VSP G series and VSP One Block).
  Provides 1 LUN per virtual disk with array-offloaded storage services
  including snapshots, clones, and online resize.
+ .
+ ALPHA: not yet validated against a live array or cluster. Do not use against
+ production data until verified on your hardware (see INTEGRATION_CHECKLIST.md).
