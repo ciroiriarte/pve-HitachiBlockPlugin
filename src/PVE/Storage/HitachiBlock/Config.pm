@@ -161,13 +161,18 @@ sub _run_locked {
     my ($self, $critical) = @_;
 
     if ($self->_use_cluster_lock()) {
-        # cfs_lock_storage builds the corosync lock id "storage-<storeid>" and runs
-        # $critical under it. (cfs_lock_file must NOT be used here — its first arg
-        # has to be a pmxcfs-registered config file, so it would die "unknown file".)
-        # On in-code failure it sets $@ and returns undef; on success it returns the
-        # coderef's value (our arrayref).
-        my $res = PVE::Cluster::cfs_lock_storage(
-            $self->{storeid}, $REGISTRY_LOCK_TIMEOUT, $critical);
+        # Use a DEDICATED corosync lock domain for the registry —
+        # "domain-hitachiblock-registry-<storeid>" — NOT cfs_lock_storage($storeid).
+        # PVE core already wraps vdisk_alloc/vdisk_free/activate_storage and content
+        # listing in cluster_lock_storage() == cfs_lock_storage("storage-<storeid>").
+        # Re-acquiring that SAME (non-reentrant) lock from inside those operations
+        # self-deadlocks, stalling every alloc/free — and even browsing the storage in
+        # the GUI — for the full lock timeout. A separate domain still serializes
+        # registry mutations cluster-wide (including the hitachiblock-repl CLI, which
+        # runs outside any PVE storage lock) without colliding. cfs_lock_* sets $@ and
+        # returns undef on in-code failure; returns the coderef's value on success.
+        my $res = PVE::Cluster::cfs_lock_domain(
+            "hitachiblock-registry-$self->{storeid}", $REGISTRY_LOCK_TIMEOUT, $critical);
         croak "Cannot acquire cluster registry lock: $@" if $@;
         return $res;
     }
@@ -202,7 +207,7 @@ sub _use_cluster_lock {
     return $CLUSTER_LOCK_OK if defined $CLUSTER_LOCK_OK;
     $CLUSTER_LOCK_OK = eval {
         require PVE::Cluster;
-        PVE::Cluster->can('cfs_lock_storage') ? 1 : 0;
+        PVE::Cluster->can('cfs_lock_domain') ? 1 : 0;
     } || 0;
     return $CLUSTER_LOCK_OK;
 }
