@@ -39,6 +39,10 @@ using the plugin against any real array.
     REST API: login/sessions, Virtual Fabrics (`vf-id`), name-server, and the **FC zoning**
     transaction model — for scripting/verifying the zoning prerequisite during bring-up
     (the SAN switch, *not* the array).
+  - [`san-design-best-practices-extract.md`](reference/san-design-best-practices-extract.md)
+    — Brocade SAN design guidance relevant to the plugin: fabric redundancy/MPIO, zoning
+    best practices (single-initiator/peer/PWWN/No-Access), fan-in and the **cluster polling**
+    caveat, and the monitoring/diagnostics (MAPS, IO Insight, D_Port) to use during testing.
 
 ## Project files
 
