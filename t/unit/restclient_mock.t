@@ -73,6 +73,23 @@ subtest 'create_ldev_sends_correct_body' => sub {
     like($log[0]{url}, qr{/ldevs$}, 'correct URL');
     is($log[0]{body}{poolId}, 0, 'pool_id in body');
     is($log[0]{body}{byteFormatCapacity}, '1024M', 'size in body');
+    # auto-assign mode (no ldev_id): isParallelExecutionEnabled is allowed.
+    ok($log[0]{body}{isParallelExecutionEnabled}, 'parallel exec set when auto-assigning');
+    ok(!exists $log[0]{body}{ldevId}, 'no ldevId when auto-assigning');
+};
+
+subtest 'create_ldev_explicit_id_no_parallel' => sub {
+    # Regression: an explicit ldevId must NOT be combined with
+    # isParallelExecutionEnabled (the array rejects it, KART40046-E).
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({ jobId => 'job-2' }, { state => 'Succeeded', affectedResources => ['/ldevs/256'] });
+
+    $client->create_ldev(pool_id => 0, size_mb => 1024, ldev_id => 256);
+
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{body}{ldevId}, 256, 'ldevId in body');
+    ok(!exists $log[0]{body}{isParallelExecutionEnabled},
+        'isParallelExecutionEnabled omitted with explicit ldevId');
 };
 
 subtest 'delete_ldev_sends_delete' => sub {

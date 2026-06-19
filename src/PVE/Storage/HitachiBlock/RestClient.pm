@@ -201,10 +201,16 @@ sub create_ldev {
     my $body = {
         poolId       => int($opts{pool_id}),
         byteFormatCapacity => $opts{size_mb} . "M",
-        isParallelExecutionEnabled => JSON::true,
     };
 
-    $body->{ldevId} = int($opts{ldev_id}) if defined $opts{ldev_id};
+    if (defined $opts{ldev_id}) {
+        # Explicit LDEV id (the plugin always allocates from ldev_range).
+        # isParallelExecutionEnabled is ONLY valid when the array auto-assigns
+        # the id; combining it with an explicit ldevId is rejected (KART40046-E).
+        $body->{ldevId} = int($opts{ldev_id});
+    } else {
+        $body->{isParallelExecutionEnabled} = JSON::true;
+    }
 
     my $res = $self->_request('POST', $self->_url('/ldevs'), $body);
 
