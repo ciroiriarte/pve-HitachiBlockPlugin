@@ -144,8 +144,9 @@ for per-platform examples.
 make test    # Perl unit tests (logic + PVE contracts; the array is mocked)
 ```
 
-The unit suite does **not** touch hardware. Real validation follows
-[`docs/INTEGRATION_CHECKLIST.md`](docs/INTEGRATION_CHECKLIST.md); record results under
+The unit suite does **not** touch hardware. Real validation follows the
+[Test Plan](docs/test-plan.md) and the
+[Hardware Integration Checklist](docs/INTEGRATION_CHECKLIST.md); record results under
 `t/integration/`.
 
 ## Contributing

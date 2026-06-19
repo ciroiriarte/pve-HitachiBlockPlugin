@@ -18,6 +18,9 @@ using the plugin against any real array.
 5. **[Hardware Integration Checklist](INTEGRATION_CHECKLIST.md)** — **read before
    trusting the plugin on hardware.** A phased bring-up checklist enumerating every
    array/host assumption, how to verify it, and what to change if it is wrong.
+6. **[Test Plan](test-plan.md)** — environment-specific runbook for the VSP E590H lab
+   bring-up: PVE acceptance steps + the checklist assumptions + the safety controls for
+   testing against a shared production array.
 
 ## Reference
 
