@@ -326,26 +326,50 @@ sub get_host_group {
 sub add_wwn_to_host_group {
     my ($self, %opts) = @_;
 
-    croak "host_group_id is required" unless $opts{host_group_id};
-    croak "wwn is required"           unless $opts{wwn};
+    croak "port_id is required"           unless defined $opts{port_id};
+    croak "host_group_number is required" unless defined $opts{host_group_number};
+    croak "wwn is required"               unless $opts{wwn};
 
+    # CM REST /host-wwns needs portId + hostGroupNumber to target the right host
+    # group; without hostGroupNumber the WWN would not land in our group.
+    # NOTE: hostWwnNickname is NOT accepted in this body on the embedded REST of
+    # the VSP E series (KART40038-E "unsupported parameter") — omit it. (A WWN
+    # nickname, if ever wanted, must be set via a separate request.)
     my $body = {
-        hostWwn  => $opts{wwn},
-        portId   => $opts{port_id},
+        portId          => $opts{port_id},
+        hostGroupNumber => int($opts{host_group_number}),
+        hostWwn         => $opts{wwn},
     };
-    $body->{hostWwnNickname} = $opts{nickname} if $opts{nickname};
 
     my $res = $self->_request('POST', $self->_url("/host-wwns"), $body);
     return $self->_wait_for_job($res);
 }
 
 sub list_host_wwns {
-    my ($self, $host_group_id) = @_;
+    my ($self, %opts) = @_;
 
-    croak "host_group_id is required" unless defined $host_group_id;
+    croak "port_id is required" unless defined $opts{port_id};
 
-    my $data = $self->_request('GET', $self->_url("/host-groups/$host_group_id/host-wwns"));
+    # CM REST lists host WWNs via the top-level /host-wwns collection filtered by
+    # portId (+ hostGroupNumber), NOT a /host-groups/<id>/host-wwns subresource
+    # (that path 404s on the VSP E embedded REST).
+    my @params = ("portId=$opts{port_id}");
+    push @params, "hostGroupNumber=$opts{host_group_number}"
+        if defined $opts{host_group_number};
+    my $query = '?' . join('&', @params);
+
+    my $data = $self->_request('GET', $self->_url("/host-wwns$query"));
     return $data->{data} || [];
+}
+
+sub find_host_group_by_name {
+    my ($self, $port_id, $name) = @_;
+
+    my $groups = $self->list_host_groups(port_id => $port_id);
+    for my $hg (@$groups) {
+        return $hg if defined $hg->{hostGroupName} && $hg->{hostGroupName} eq $name;
+    }
+    return undef;
 }
 
 sub find_host_group_by_wwn {
@@ -353,8 +377,12 @@ sub find_host_group_by_wwn {
 
     my $groups = $self->list_host_groups(port_id => $port_id);
     for my $hg (@$groups) {
-        my $hg_id = $hg->{hostGroupId};
-        my $wwns = eval { $self->list_host_wwns($hg_id) } || [];
+        my $wwns = eval {
+            $self->list_host_wwns(
+                port_id           => $port_id,
+                host_group_number => $hg->{hostGroupNumber},
+            );
+        } || [];
         for my $w (@$wwns) {
             if (lc($w->{hostWwn}) eq lc($wwn)) {
                 return $hg;

@@ -186,6 +186,27 @@ subtest 'create_host_group_with_host_mode' => sub {
     is($log[0]{body}{hostMode}, 'LINUX/IRIX', 'host mode in body');
 };
 
+subtest 'add_wwn_sends_hostgroupnumber' => sub {
+    # Regression: the /host-wwns body must include portId AND hostGroupNumber,
+    # or the WWN does not land in our host group (found in live Phase C).
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({ jobId => 'job-wwn' }, { state => 'Succeeded', affectedResources => [] });
+
+    $client->add_wwn_to_host_group(
+        port_id           => 'CL1-A',
+        host_group_number => 7,
+        wwn               => '10000000c9abcdef',
+    );
+
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{method}, 'POST', 'POST method');
+    like($log[0]{url}, qr{/host-wwns$}, 'host-wwns endpoint');
+    is($log[0]{body}{portId}, 'CL1-A', 'portId in body');
+    is($log[0]{body}{hostGroupNumber}, 7, 'hostGroupNumber in body');
+    is($log[0]{body}{hostWwn}, '10000000c9abcdef', 'hostWwn in body');
+    ok(!exists $log[0]{body}{hostWwnNickname}, 'no hostWwnNickname (rejected by VSP E REST)');
+};
+
 # ── LUN Mapping Operations ──
 
 subtest 'map_lun_sends_correct_body' => sub {

@@ -112,7 +112,7 @@ subtest 'host_group_operations_require_params' => sub {
     like($@, qr/port_id is required/, 'create_host_group needs port_id');
 
     eval { $client->add_wwn_to_host_group() };
-    like($@, qr/host_group_id is required/, 'add_wwn needs host_group_id');
+    like($@, qr/port_id is required/, 'add_wwn needs port_id');
 };
 
 subtest 'lun_operations_require_params' => sub {

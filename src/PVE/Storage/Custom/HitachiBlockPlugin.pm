@@ -1205,38 +1205,51 @@ sub _ensure_host_groups {
     my $hostname = `hostname -s`;
     chomp($hostname);
 
+    my $hg_name = "PVE_${hostname}";
+
     for my $port_id (@ports) {
         $port_id =~ s/^\s+|\s+$//g;
+        next unless length $port_id;
 
-        # Check if a host group with our WWNs already exists
-        my $existing_hg;
-        for my $wwn (@$wwns) {
-            $existing_hg = $client->find_host_group_by_wwn($port_id, $wwn);
-            last if $existing_hg;
+        # Idempotent: reuse an existing host group (by our name first, else by any
+        # of our WWNs); only create when truly absent. We re-look-up after create
+        # to get the array-assigned hostGroupNumber, because the create response's
+        # resource id is a composite "portId,number" we don't parse.
+        my $hg = $client->find_host_group_by_name($port_id, $hg_name);
+        if (!$hg) {
+            for my $wwn (@$wwns) {
+                $hg = $client->find_host_group_by_wwn($port_id, $wwn);
+                last if $hg;
+            }
         }
-
-        unless ($existing_hg) {
-            # Create new host group
-            my $hg_name = "PVE_${hostname}";
-            my $result = $client->create_host_group(
+        if (!$hg) {
+            $client->create_host_group(
                 port_id         => $port_id,
                 host_group_name => $hg_name,
                 host_mode       => $host_mode,
             );
+            $hg = $client->find_host_group_by_name($port_id, $hg_name);
+            die "host group '$hg_name' not found on $port_id after creation\n"
+                unless $hg;
+        }
 
-            my $hg_id = $result->{resourceId};
-            # Add all local WWNs
-            for my $wwn (@$wwns) {
-                eval {
-                    $client->add_wwn_to_host_group(
-                        host_group_id => "${port_id},${hg_id}",
-                        port_id       => $port_id,
-                        wwn           => $wwn,
-                        nickname      => "PVE_${hostname}_${wwn}",
-                    );
-                };
-                warn "WWN add warning: $@" if $@;
-            }
+        my $hg_num = $hg->{hostGroupNumber};
+
+        # Register any of our WWNs not already present (idempotent).
+        my $existing_wwns = eval {
+            $client->list_host_wwns(port_id => $port_id, host_group_number => $hg_num);
+        } || [];
+        my %present = map { lc($_->{hostWwn}) => 1 } @$existing_wwns;
+        for my $wwn (@$wwns) {
+            next if $present{lc($wwn)};
+            eval {
+                $client->add_wwn_to_host_group(
+                    port_id           => $port_id,
+                    host_group_number => $hg_num,
+                    wwn               => $wwn,
+                );
+            };
+            warn "WWN add warning ($port_id $wwn): $@" if $@;
         }
     }
 
