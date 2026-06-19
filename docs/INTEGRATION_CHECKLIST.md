@@ -188,12 +188,12 @@ E590H microcode, so the hardware checks below still apply.
 - **Code:** `RestClient::create_snapshot`/`restore_snapshot`/`delete_snapshot`, `HitachiBlockPlugin::volume_snapshot*`.
 - **Verify:** `qm snapshot`, write data, `qm rollback`, confirm the data reverts; `qm delsnapshot`.
 
-### 4.2 **CoW linked clone (autoSplit=0)** — confirm it is actually CoW
-- **Assumption:** a Thin Image pair created **without `autoSplit` and without `isClone`** yields a persistent, space-efficient S-VOL that reads through to the P-VOL via copy-on-write (the volume stays usable indefinitely, sharing blocks with its base).
-- **Code:** `HitachiBlockPlugin::clone_image`, `RestClient::create_snapshot` (`auto_split => 0`).
-- **Verify:** linked-clone a template; immediately check pool usage (should NOT jump by the full disk size); `curl -sk -H "$AUTH" "$BASE/snapshots?pvolLdevId=<base>" | jq` and confirm the pair status is a live CoW pair, not auto-split/copying. Run the clone for an extended period and confirm it stays valid.
-- **Expected:** instant clone, minimal space, S-VOL persists and is independent-readable while sharing unwritten blocks.
-- **If wrong (array auto-splits, copies fully, or the S-VOL becomes invalid):** the E590H may require a different primitive for persistent CoW clones (e.g. a TI "cascade"/clone attribute, or it may only support snapshot-style pairs). Re-map `clone_image` to whatever the array's true thin-clone primitive is, and revisit the dependency model.
+### 4.2 **CoW linked clone (autoSplit=true)** — confirm it is actually CoW
+- **Assumption:** a Thin Image pair created **split** (`autoSplit=true`, `isClone` unset) leaves the S-VOL in `PSUS` — host-R/W yet still sharing unchanged blocks with the P-VOL via the pool (copy-on-write) — a persistent, space-efficient clone that stays usable indefinitely while sharing blocks with its base.
+- **Code:** `HitachiBlockPlugin::clone_image` (`auto_split => 1`), `RestClient::create_snapshot`.
+- **Verify:** linked-clone a template; immediately check pool usage (should NOT jump by the full disk size); `curl -sk -H "$AUTH" "$BASE/snapshots?pvolLdevId=<base>" | jq` and confirm the pair is a live **split** CoW pair (S-VOL in `PSUS`, sharing blocks) — NOT a full `isClone` copy that auto-deletes the pair. Run the clone for an extended period and confirm it stays valid.
+- **Expected:** instant clone, minimal space, S-VOL persists in `PSUS` and is host-readable/writable while sharing unwritten blocks.
+- **If wrong (array full-copies, deletes the pair, or the S-VOL becomes invalid / not host-R/W):** the E590H may require a different primitive for persistent CoW clones (e.g. a TI "cascade"/clone attribute, or it may only support snapshot-style pairs). Re-map `clone_image` to whatever the array's true thin-clone primitive is, and revisit the dependency model.
 
 ### 4.3 Clone/snapshot dependency guards
 - **Assumption:** deleting a base/source or its snapshot while a linked clone exists must be refused.
