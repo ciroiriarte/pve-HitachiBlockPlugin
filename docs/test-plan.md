@@ -81,10 +81,10 @@ delete, and *orphan-scan* LDEVs. To guarantee it can never touch production:
   matching value, a non-matching value, and a bogus value and confirm the counts differ.
 
 > **Incident (2026-06-19, recorded for the lesson):** an early `free` relied on the (ignored)
-> `ldevId` selector and scanned all host groups, unmapping 8 *production* fabric-A LUN paths
-> from `dev-mmr-pve-01` before the array's "host I/O" guard halted it. No data was lost (no
-> LDEV deleted; the fabric-B paths stayed up) and the paths were restored. Fixes: client-side
-> `ldevId` filtering, unmap via `ports[]`, and the S8 fence. This is *why* S8/S9 exist.
+> `ldevId` selector and scanned all host groups, unmapping several *production* fabric-A LUN
+> paths from another host's host group before the array's "host I/O" guard halted it. No data
+> was lost (no LDEV deleted; the fabric-B paths stayed up) and the paths were restored. Fixes:
+> client-side `ldevId` filtering, unmap via `ports[]`, and the S8 fence. This is *why* S8/S9 exist.
 
 ---
 
