@@ -471,7 +471,15 @@ sub free_image {
     };
     warn "Snapshot cleanup warning: $@" if $@;
 
-    # Unmap the LDEV's LUN paths from every host group on every target port.
+    # Tear down the HOST side FIRST: flush the multipath map, de-whitelist, and
+    # delete the underlying SCSI paths. This must happen before the array unmap —
+    # otherwise the array refuses the unmap with "the LU is executing host I/O"
+    # (multipathd's path checker keeps the paths active).
+    my $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+    eval { $multipath->remove_device($wwid) };
+    warn "Device removal warning: $@" if $@;
+
+    # Then unmap the LDEV's LUN paths from every host group on every target port.
     # CM REST GET /luns REQUIRES BOTH portId AND hostGroupNumber (ldevId alone, or
     # portId+ldevId, are rejected with KART40044-E "required parameters not
     # specified"), so enumerate each port's host groups and unmap any path that
@@ -496,11 +504,6 @@ sub free_image {
         }
     };
     warn "LUN unmap warning: $@" if $@;
-
-    # Remove multipath device from host
-    my $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
-    eval { $multipath->remove_device($wwid) };
-    warn "Device removal warning: $@" if $@;
 
     # Delete LDEV
     $client->delete_ldev($ldev_id);
