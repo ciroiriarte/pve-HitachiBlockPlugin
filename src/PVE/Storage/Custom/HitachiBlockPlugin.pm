@@ -293,9 +293,32 @@ sub status {
 
     # Hitachi Configuration Manager reports DP pool capacities in MB; convert to
     # bytes for PVE. (Documented unit — no value-magnitude guessing.)
-    my $total = ($pool->{totalPoolCapacity} || 0) * 1024 * 1024;
-    my $used  = ($pool->{usedPoolCapacity}  || 0) * 1024 * 1024;
-    my $free  = $total - $used;
+    my $mb = 1024 * 1024;
+    my $total = ($pool->{totalPoolCapacity} || 0) * $mb;
+
+    # `usedPoolCapacity` is NOT populated on every microcode: the VSP E590H
+    # (and other embedded-REST E-series) returns it as null while reporting
+    # `availableVolumeCapacity` and `usedCapacityRate`. Reading usedPoolCapacity
+    # blindly made status() report the pool as 0% used (all-free), which hides
+    # over-provisioning and capacity alarms. Derive `used` from whatever the
+    # array actually returns, in order of accuracy:
+    #   1. usedPoolCapacity            (direct, when present)
+    #   2. total - availableVolumeCapacity  (documented free field; E590H path)
+    #   3. total * usedCapacityRate/100     (percentage, last resort)
+    my $used;
+    if (defined $pool->{usedPoolCapacity}) {
+        $used = $pool->{usedPoolCapacity} * $mb;
+    } elsif (defined $pool->{availableVolumeCapacity}) {
+        $used = $total - $pool->{availableVolumeCapacity} * $mb;
+    } elsif (defined $pool->{usedCapacityRate}) {
+        $used = int($total * $pool->{usedCapacityRate} / 100);
+    } else {
+        $used = 0;
+    }
+    $used = 0      if $used < 0;
+    $used = $total if $used > $total;
+
+    my $free = $total - $used;
     $free = 0 if $free < 0;
 
     return ($total, $free, $used, 1);

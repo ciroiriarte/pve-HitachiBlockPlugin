@@ -83,6 +83,54 @@ subtest 'ldev_size_mb_logic' => sub {
        'block count wins over byteFormatCapacity');
 };
 
+subtest 'status_pool_used_logic' => sub {
+    # Mirrors status(): derive used/free (bytes) from a pool object whose MB
+    # fields may or may not include usedPoolCapacity. Confirmed on a VSP E590H
+    # that usedPoolCapacity is null while availableVolumeCapacity is populated.
+    my $mb = 1024 * 1024;
+    my $derive = sub {
+        my ($pool) = @_;
+        my $total = ($pool->{totalPoolCapacity} || 0) * $mb;
+        my $used;
+        if (defined $pool->{usedPoolCapacity}) {
+            $used = $pool->{usedPoolCapacity} * $mb;
+        } elsif (defined $pool->{availableVolumeCapacity}) {
+            $used = $total - $pool->{availableVolumeCapacity} * $mb;
+        } elsif (defined $pool->{usedCapacityRate}) {
+            $used = int($total * $pool->{usedCapacityRate} / 100);
+        } else {
+            $used = 0;
+        }
+        $used = 0      if $used < 0;
+        $used = $total if $used > $total;
+        my $free = $total - $used;
+        $free = 0 if $free < 0;
+        return ($total, $free, $used);
+    };
+
+    # 1. usedPoolCapacity present -> used directly from it.
+    my @r = $derive->({ totalPoolCapacity => 10240, usedPoolCapacity => 2048 });
+    is($r[0], 10240 * $mb, 'total');
+    is($r[2], 2048 * $mb,  'used from usedPoolCapacity');
+    is($r[1], 8192 * $mb,  'free = total - used');
+
+    # 2. E590H case: usedPoolCapacity null -> derive from availableVolumeCapacity.
+    @r = $derive->({ totalPoolCapacity => 22210482, usedPoolCapacity => undef,
+                     availableVolumeCapacity => 21576282, usedCapacityRate => 2 });
+    is($r[2], (22210482 - 21576282) * $mb, 'used = total - availableVolumeCapacity');
+    is($r[1], 21576282 * $mb, 'free = availableVolumeCapacity');
+    ok($r[2] > 0, 'pool is NOT reported as 0%-used (the bug this guards)');
+
+    # 3. last resort: only usedCapacityRate present.
+    @r = $derive->({ totalPoolCapacity => 1000, usedCapacityRate => 25 });
+    is($r[2], int(1000 * $mb * 25 / 100), 'used from usedCapacityRate');
+
+    # clamp: nonsense available > total must not yield negative used.
+    @r = $derive->({ totalPoolCapacity => 100, availableVolumeCapacity => 999 });
+    is($r[2], 0, 'used clamped to >= 0');
+    is($r[1], 100 * $mb, 'free clamped to total');
+};
+
 subtest 'vmid_from_volname' => sub {
     my $extract = sub {
         my ($v) = @_;

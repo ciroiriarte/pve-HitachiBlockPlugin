@@ -149,6 +149,25 @@ subtest 'get_pool_returns_capacity' => sub {
     is($pool->{usedPoolCapacity}, 2048, 'used capacity');
 };
 
+subtest 'get_pool_e590h_null_usedcapacity' => sub {
+    # Real VSP E590H microcode: usedPoolCapacity is null, availableVolumeCapacity
+    # and usedCapacityRate are populated. status() must cope (see plugin.t).
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({
+        poolId => 0,
+        poolStatus => 'POLN',
+        totalPoolCapacity => 22210482,
+        usedPoolCapacity  => undef,
+        availableVolumeCapacity => 21576282,
+        usedCapacityRate => 2,
+    });
+
+    my $pool = $client->get_pool(0);
+    is($pool->{totalPoolCapacity}, 22210482, 'total capacity present');
+    ok(!defined $pool->{usedPoolCapacity}, 'usedPoolCapacity null (as on E590H)');
+    is($pool->{availableVolumeCapacity}, 21576282, 'availableVolumeCapacity present');
+};
+
 # ── Host Group Operations ──
 
 subtest 'create_host_group_with_host_mode' => sub {

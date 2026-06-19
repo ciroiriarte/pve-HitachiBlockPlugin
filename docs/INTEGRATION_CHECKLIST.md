@@ -47,9 +47,10 @@ E590H microcode, so the hardware checks below still apply.
   correctly — but switching create/expand to `blockCapacity`/`additionalBlockCapacity`
   would remove rounding ambiguity (recommended improvement). → Phase 2.1.
 - **Pool capacities are in MB = MiB (base-1024)** — `status()`'s `*1024*1024` is correct.
-  BUT the documented free-space field is **`availableVolumeCapacity`**; confirm whether
-  `usedPoolCapacity` (what the code reads) is also returned, or switch to
-  `totalPoolCapacity - availableVolumeCapacity`. → Phase 2.4.
+  **CONFIRMED on the E590H (2026-06-19 discovery):** `usedPoolCapacity` is **null**; only
+  `totalPoolCapacity`, `availableVolumeCapacity`, and `usedCapacityRate` are populated.
+  `status()` **fixed** to derive `used` = `usedPoolCapacity` when present, else
+  `total - availableVolumeCapacity`, else `total * usedCapacityRate/100`. → Phase 2.4.
 - **LDEV `label` max = 32 chars** (confirmed) → our `$MAX_LABEL_LEN = 32` is right.
 - **WWID/NAA:** the array returns the real `naaId` on **`GET /ldevs/{id}`** (not on
   `/luns`); the Linux multipath WWID is `3` + `naaId`. **Code improved** to read
@@ -139,11 +140,16 @@ E590H microcode, so the hardware checks below still apply.
 - **Verify:** set a 32-char label and a 33-char one; confirm the array's real limit and that orphan detection still matches hashed labels.
 - **If wrong:** adjust `$MAX_LABEL_LEN` in `Config.pm`.
 
-### 2.4 status() pool capacity units
+### 2.4 status() pool capacity units — ✅ CONFIRMED & FIXED (E590H, 2026-06-19)
 - **Assumption:** `totalPoolCapacity`/`usedPoolCapacity` are in **MB**.
-- **Code:** `HitachiBlockPlugin::status`.
-- **Verify:** `curl -sk -H "$AUTH" "$BASE/pools/<id>" | jq '{totalPoolCapacity, usedPoolCapacity}'`; compare against the array GUI's reported pool size.
-- **If wrong:** fix the unit multiplier in `status()`.
+- **Finding:** units are MB (correct), **but `usedPoolCapacity` is returned as `null`** on the
+  E590H microcode — only `totalPoolCapacity`, `availableVolumeCapacity`, and `usedCapacityRate`
+  are populated. The old code read `usedPoolCapacity` directly, so it reported the pool as
+  **0% used / all-free** (hides over-provisioning and capacity alarms).
+- **Code:** `HitachiBlockPlugin::status` — now derives `used` = `usedPoolCapacity` when present,
+  else `total - availableVolumeCapacity`, else `total * usedCapacityRate/100` (clamped 0..total).
+  Covered by `plugin.t` `status_pool_used_logic` and `restclient_mock.t`.
+- **Verify:** `curl -sk -H "$AUTH" "$BASE/pools/<id>" | jq '{totalPoolCapacity, usedPoolCapacity, availableVolumeCapacity, usedCapacityRate}'`; confirm `pvesm status` used/free match the array GUI.
 
 ---
 
