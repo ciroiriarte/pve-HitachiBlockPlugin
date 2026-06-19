@@ -151,6 +151,24 @@ subtest 'list_ldevs_with_filters' => sub {
     like($log[0]{url}, qr{ldevOption=dpVolume}, 'dp filter in URL');
 };
 
+subtest 'list_luns_filters_ldev_client_side' => sub {
+    # CRITICAL safety: GET /luns ignores ldevId server-side and returns ALL LUNs
+    # in the host group. list_luns must filter by ldevId client-side, or a caller
+    # iterating host groups could unmap another host's/volume's LUN path.
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({ data => [
+        { lunId => 'CL1-A,1,8', ldevId => 30 },   # another host's LUN
+        { lunId => 'CL1-A,2,0', ldevId => 256 },  # ours
+    ]});
+
+    my $luns = $client->list_luns(port_id => 'CL1-A', host_group_number => 1, ldev_id => 256);
+    is(scalar @$luns, 1, 'only the matching ldev returned');
+    is($luns->[0]{lunId}, 'CL1-A,2,0', 'returned our LUN, not the other host\'s');
+    # ldevId must NOT be sent as a query param (it is ignored / misleading).
+    my @log = MockRestClient::get_request_log();
+    unlike($log[0]{url}, qr{ldevId=}, 'no ldevId query param');
+};
+
 # ── Pool Operations ──
 
 subtest 'get_pool_returns_capacity' => sub {

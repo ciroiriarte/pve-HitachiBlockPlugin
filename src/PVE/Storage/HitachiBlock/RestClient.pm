@@ -433,11 +433,21 @@ sub list_luns {
     my @params;
     push @params, "portId=$filter{port_id}"                     if $filter{port_id};
     push @params, "hostGroupNumber=$filter{host_group_number}"  if defined $filter{host_group_number};
-    push @params, "ldevId=$filter{ldev_id}"                     if defined $filter{ldev_id};
 
     my $query = @params ? '?' . join('&', @params) : '';
     my $data = $self->_request('GET', $self->_url("/luns$query"));
-    return $data->{data} || [];
+    my $luns = $data->{data} || [];
+
+    # CRITICAL: ldevId is NOT honoured as a server-side filter on GET /luns — the
+    # array IGNORES it and returns every LUN path in the host group. Filtering by
+    # ldevId MUST be done client-side; otherwise a caller iterating host groups
+    # would see (and could unmap) OTHER hosts' / other volumes' LUN paths.
+    if (defined $filter{ldev_id}) {
+        my $want = int($filter{ldev_id});
+        $luns = [ grep { defined $_->{ldevId} && int($_->{ldevId}) == $want } @$luns ];
+    }
+
+    return $luns;
 }
 
 # ── Snapshot Operations (Thin Image) ──
