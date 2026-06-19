@@ -83,6 +83,31 @@ subtest 'ldev_size_mb_logic' => sub {
        'block count wins over byteFormatCapacity');
 };
 
+subtest 'no_duplicate_pve_common_properties' => sub {
+    # Regression guard: PVE common properties (username/password, defined by the
+    # base/CIFS/PBS plugins) must NOT be redefined in our properties(), or
+    # PVE::SectionConfig dies "duplicate property ..." and breaks pvesm + the PVE
+    # daemons. They may only be *referenced* in options(). (Found in live Phase B.)
+    my $src = do {
+        local $/;
+        open my $fh, '<', 'src/PVE/Storage/Custom/HitachiBlockPlugin.pm'
+            or die "cannot open plugin source: $!";
+        <$fh>;
+    };
+    my ($props) = $src =~ /sub\s+properties\s*\{(.*?)\n\}/s;
+    ok(defined $props, 'found properties() body');
+    for my $reserved (qw(username password)) {
+        unlike($props, qr/^\s*\Q$reserved\E\s*=>\s*\{/m,
+            "properties() does not redefine reserved PVE property '$reserved'");
+    }
+    # And confirm they are still accepted as input via options().
+    my ($opts) = $src =~ /sub\s+options\s*\{(.*?)\n\}/s;
+    for my $reserved (qw(username password)) {
+        like($opts, qr/^\s*\Q$reserved\E\s*=>/m,
+            "options() still references '$reserved'");
+    }
+};
+
 subtest 'status_pool_used_logic' => sub {
     # Mirrors status(): derive used/free (bytes) from a pool object whose MB
     # fields may or may not include usedPoolCapacity. Confirmed on a VSP E590H

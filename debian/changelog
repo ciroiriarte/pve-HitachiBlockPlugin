@@ -1,3 +1,16 @@
+pve-storage-hitachiblock (1.2.0~alpha2-1) stable; urgency=medium
+
+  * Live-PVE bring-up fixes (VSP E590H, PVE 9.2):
+    - CRITICAL: stop redefining the `username`/`password` properties — PVE's
+      base/CIFS/PBS plugins already define them, so PVE::SectionConfig died with
+      "duplicate property" and broke pvesm and the PVE daemons on plugin install.
+      They are now only referenced in options(). Regression-guarded in plugin.t.
+    - status(): derive pool used capacity when `usedPoolCapacity` is null (as the
+      E590H microcode returns) from total - availableVolumeCapacity / usedCapacityRate;
+      previously reported the pool as 0% used.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Fri, 19 Jun 2026 12:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha1-1) stable; urgency=medium
 
   * Alpha pre-release: not yet validated against a live array or cluster.

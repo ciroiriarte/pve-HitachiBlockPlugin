@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.0~alpha2] - 2026-06-19
+
+> **Alpha pre-release** — bring-up fixes from first live install on a PVE 9.2
+> cluster against a VSP E590H.
+
+### Fixed
+- **Critical (plugin load):** stopped redefining the `username`/`password`
+  storage properties. PVE's base/CIFS/PBS plugins already define them, so
+  `PVE::SectionConfig` aborted with `duplicate property 'username'`, which broke
+  `pvesm` and the PVE daemons the moment the plugin was installed. They are now
+  only referenced in `options()`. Regression-guarded in `t/unit/plugin.t`.
+- **Pool capacity reporting:** `status()` now derives used capacity when the array
+  returns a null `usedPoolCapacity` (confirmed on the E590H microcode) from
+  `total - availableVolumeCapacity` (or `usedCapacityRate`); it previously reported
+  the DP pool as 0% used / all-free.
+
 ## [1.2.0~alpha1] - 2026-06-17
 
 > **Alpha pre-release** — not yet validated against a live array or cluster.

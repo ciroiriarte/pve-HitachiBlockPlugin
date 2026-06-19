@@ -91,16 +91,11 @@ sub properties {
             type        => 'integer',
             optional    => 1,
         },
-        username => {
-            description => "API username (stored in credential file, not in storage.cfg).",
-            type        => 'string',
-            optional    => 1,
-        },
-        password => {
-            description => "API password (stored in credential file, not in storage.cfg).",
-            type        => 'string',
-            optional    => 1,
-        },
+        # NOTE: `username` and `password` are intentionally NOT defined here.
+        # They are common properties already defined by PVE's base/other storage
+        # plugins (e.g. CIFS/PBS); redefining them makes PVE::SectionConfig die with
+        # "duplicate property 'username'", which breaks pvesm and the PVE daemons.
+        # We only reference them in options() (like nodes/content/shared/disable).
         qos_upper_iops => {
             description => "Default upper IOPS limit per LDEV (0 = unlimited).",
             type        => 'integer',
