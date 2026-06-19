@@ -40,8 +40,20 @@ curl -sk -D - -o /dev/null -u 'USER:PASS' \
 
 **Logout** — `POST https://<switch>/rest/logout` with the token (frees the session; 204).
 
-**Session limit (p34):** default **3** concurrent REST sessions, configurable **1–10**.
-Always log out; sessions are scarce and an open one also holds any zone transaction (below).
+**Session limit (p34, p52):** default **3** concurrent REST sessions, configurable **1–10**,
+shared across *all* REST clients of the switch (SANnav, monitoring, scripts). Exceeding it
+returns HTTP 403 `"Max limit for REST sessions reached"` (error-code 14). Always log out;
+sessions are scarce and an open one also holds any zone transaction (below). Leaked sessions
+(scripts that abort before logout) block everyone until they age out.
+
+**Managing sessions from the switch CLI** (`mgmtapp`, p50–52) — for when the cap is exhausted:
+
+```
+mgmtapp --showsessions                 # list active REST sessions: time, source IP, user, app, session-id
+mgmtapp --terminate <session_id>       # kill one stale session (use the id from --showsessions)
+mgmtapp --show                         # REST config incl. configured "Session Count" (the max)
+mgmtapp --config -maxrestsession 10    # raise the cap (1..10, default 3) — recommended for clusters/automation
+```
 
 **Session-less GET (pp. 34–36):** FOS 9.1+ allows a one-shot authenticated GET (login +
 GET + logout in one request) — handy for read-only discovery:
