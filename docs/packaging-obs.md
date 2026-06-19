@@ -56,6 +56,19 @@ osc results home:ciriarte:pve-HitachiBlockPlugin
 osc buildlog home:ciriarte:pve-HitachiBlockPlugin PVE_9 x86_64
 ```
 
+## Why it builds against plain Debian 13 (no Proxmox in the chroot)
+
+The PVE Perl modules (`PVE::Storage::Plugin` — the `use base` parent of the main
+plugin — plus `PVE::JSONSchema` and `PVE::Tools`) ship in Proxmox's repositories,
+**not** in the Debian 13 base that OBS builds against. They are therefore *runtime*
+dependencies (covered by `Depends: proxmox-ve`), never build dependencies.
+
+The build never evaluates them because it does not compile the main plugin:
+`dh_install`/`make install` only *copy* the `.pm` files, and `dh_auto_test` runs
+the unit suite, which loads only `Config`/`Multipath`/`RestClient` (these need just
+`JSON` and `LWP`, declared in `Build-Depends`). Do **not** add the `PVE::*` modules
+to `Build-Depends` — they are unresolvable on Debian and would break the build.
+
 ## Installing the built package (on a PVE 9 node)
 
 Once the build succeeds and the repository publishes:
