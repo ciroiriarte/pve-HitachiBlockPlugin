@@ -2,7 +2,10 @@ Source: pve-storage-hitachiblock
 Section: admin
 Priority: optional
 Maintainer: Ciro Iriarte <ciro.iriarte+software@gmail.com>
-Build-Depends: debhelper-compat (= 13)
+Build-Depends: debhelper-compat (= 13),
+               perl,
+               libwww-perl,
+               libjson-perl
 Standards-Version: 4.6.2
 
 Package: pve-storage-hitachiblock
