@@ -119,6 +119,31 @@ subtest 'no_duplicate_pve_common_properties' => sub {
         "on_update_hook is implemented (credential updates)");
 };
 
+subtest 'ldev_range_fence' => sub {
+    # Mirrors _ldev_in_range: destructive ops (unmap/delete) must refuse any LDEV
+    # outside the configured ldev_range. This is the backstop that would have
+    # prevented unmapping production LDEV 27 while it shares a port with our range.
+    my $in_range = sub {
+        my ($range, $id) = @_;
+        return 1 unless defined $range && length $range;
+        return 0 unless defined $id;
+        my ($min, $max);
+        if ($range =~ /^(0x[0-9a-f]+)-(0x[0-9a-f]+)$/i) { $min = hex($1); $max = hex($2); }
+        elsif ($range =~ /^(\d+)-(\d+)$/)               { $min = int($1); $max = int($2); }
+        else { die "bad range\n"; }
+        return ($id >= $min && $id <= $max) ? 1 : 0;
+    };
+    ok($in_range->('256-511', 256), 'min boundary in range');
+    ok($in_range->('256-511', 511), 'max boundary in range');
+    ok($in_range->('256-511', 300), 'middle in range');
+    ok(!$in_range->('256-511', 255), 'just below excluded');
+    ok(!$in_range->('256-511', 512), 'just above excluded');
+    ok(!$in_range->('256-511', 27),  'production LDEV 27 excluded (the incident)');
+    ok($in_range->('0x100-0x1ff', 256),   'hex range min');
+    ok(!$in_range->('0x100-0x1ff', 0x200),'hex range above excluded');
+    ok($in_range->(undef, 27), 'no range configured => no fence');
+};
+
 subtest 'status_pool_used_logic' => sub {
     # Mirrors status(): derive used/free (bytes) from a pool object whose MB
     # fields may or may not include usedPoolCapacity. Confirmed on a VSP E590H

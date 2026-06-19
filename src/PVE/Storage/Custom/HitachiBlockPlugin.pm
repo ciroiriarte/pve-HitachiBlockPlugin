@@ -479,46 +479,40 @@ sub free_image {
     eval { $multipath->remove_device($wwid) };
     warn "Device removal warning: $@" if $@;
 
-    # Then unmap the LDEV's LUN paths from every host group on every target port.
-    # CM REST GET /luns REQUIRES BOTH portId AND hostGroupNumber (ldevId alone, or
-    # portId+ldevId, are rejected with KART40044-E "required parameters not
-    # specified"), so enumerate each port's host groups and unmap any path that
-    # carries this LDEV. Covers multi-node mappings; if any path is left the LDEV
-    # delete below fails with "A path is defined in the volume".
+    # SAFETY FENCE: never unmap/delete an LDEV outside our configured range. The
+    # LDEV here comes from our own registry so it is normally in range; if it is
+    # not, refuse rather than risk touching a foreign volume.
+    die "refusing to free LDEV $ldev_id: outside ldev_range"
+        . ($scfg->{ldev_range} ? " '$scfg->{ldev_range}'" : '') . "\n"
+        unless $class->_ldev_in_range($scfg, $ldev_id);
+
+    # Unmap THIS LDEV's own LUN paths. Ask the LDEV for its paths via
+    # GET /ldevs/<id> -> ports[] (each entry is portId/hostGroupNumber/lun) instead
+    # of scanning host groups: the array IGNORES the ldevId selector on GET /luns
+    # (verified live on the E590H), so a host-group-wide scan could see and unmap
+    # OTHER hosts' LUN paths. ports[] is inherently scoped to this LDEV. If any
+    # path is left, the LDEV delete below fails with "A path is defined".
     eval {
-        for my $port_id (split(/,/, $scfg->{target_ports} || '')) {
-            $port_id =~ s/^\s+|\s+$//g;
-            next unless length $port_id;
-            my $hgs = $client->list_host_groups(port_id => $port_id);
-            for my $hg (@$hgs) {
-                next unless defined $hg->{hostGroupNumber};
-                my $luns = $client->list_luns(
-                    port_id           => $port_id,
-                    host_group_number => $hg->{hostGroupNumber},
-                    ldev_id           => $ldev_id,
-                );
-                for my $lun (@$luns) {
-                    my $lun_id = $lun->{lunId};
-                    next unless defined $lun_id;
-                    # Right after the host paths are deleted the array can still
-                    # report "the LU is executing host I/O" for a few seconds;
-                    # retry that case with backoff (other errors propagate).
-                    my $ok = 0;
-                    for my $try (1 .. 6) {
-                        $ok = eval { $client->unmap_lun($lun_id); 1 };
-                        last if $ok;
-                        die $@ unless ($@ // '') =~ /host I\/?O/i;
-                        sleep 3;
-                    }
-                    die "LUN $lun_id unmap blocked by host I/O after retries\n"
-                        unless $ok;
-                }
+        my $ldev = $client->get_ldev($ldev_id);
+        for my $pe (@{ $ldev->{ports} || [] }) {
+            next unless defined $pe->{portId}
+                && defined $pe->{hostGroupNumber} && defined $pe->{lun};
+            my $lun_id = join(',', $pe->{portId}, $pe->{hostGroupNumber}, $pe->{lun});
+            # Right after the host paths are deleted the array can still report
+            # "the LU is executing host I/O" for a few seconds; retry with backoff.
+            my $ok = 0;
+            for my $try (1 .. 6) {
+                $ok = eval { $client->unmap_lun($lun_id); 1 };
+                last if $ok;
+                die $@ unless ($@ // '') =~ /host I\/?O/i;
+                sleep 3;
             }
+            die "LUN $lun_id unmap blocked by host I/O after retries\n" unless $ok;
         }
     };
     warn "LUN unmap warning: $@" if $@;
 
-    # Delete LDEV
+    # Delete LDEV (fence already checked above)
     $client->delete_ldev($ldev_id);
 
     # Unregister (snapshots are nested inside the registry entry, cleaned up automatically)
@@ -1332,6 +1326,11 @@ sub _map_lun_to_local {
 sub _unmap_lun_from_local {
     my ($class, $storeid, $scfg, $client, $ldev_id) = @_;
 
+    # SAFETY FENCE: refuse to unmap an LDEV outside our configured range.
+    die "refusing to unmap LDEV $ldev_id: outside ldev_range"
+        . ($scfg->{ldev_range} ? " '$scfg->{ldev_range}'" : '') . "\n"
+        unless $class->_ldev_in_range($scfg, $ldev_id);
+
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
     my $wwns = $multipath->get_local_wwns();
 
@@ -1460,11 +1459,10 @@ sub _select_ports {
     return ($all_ports[$idx], $all_ports[$next_idx]);
 }
 
-sub _next_ldev_in_range {
-    my ($class, $client, $scfg, $config) = @_;
-
-    my $range = $scfg->{ldev_range}
-        or die "ldev_range is not configured\n";
+# Parse an ldev_range ("256-511" or "0x100-0x1ff") into ($min, $max); dies on a
+# malformed range.
+sub _parse_ldev_range {
+    my ($class, $range) = @_;
 
     my ($min, $max);
     if ($range =~ /^(0x[0-9a-f]+)-(0x[0-9a-f]+)$/i) {
@@ -1478,6 +1476,33 @@ sub _next_ldev_in_range {
     }
 
     die "Invalid ldev_range: min ($min) > max ($max)\n" if $min > $max;
+    return ($min, $max);
+}
+
+# SAFETY GUARD: true if $ldev_id is inside the configured ldev_range. With no
+# range configured there is no fence (returns true). Call before ANY destructive
+# op (unmap/delete) so the plugin can never act on an LDEV it does not own — e.g.
+# another host's production volumes that merely share a target port. The array
+# does NOT filter LUN queries by ldevId (verified on the E590H), so this fence is
+# the backstop that keeps us off foreign LUNs.
+sub _ldev_in_range {
+    my ($class, $scfg, $ldev_id) = @_;
+
+    my $range = $scfg->{ldev_range};
+    return 1 unless defined $range && length $range;
+    return 0 unless defined $ldev_id;
+
+    my ($min, $max) = $class->_parse_ldev_range($range);
+    return ($ldev_id >= $min && $ldev_id <= $max) ? 1 : 0;
+}
+
+sub _next_ldev_in_range {
+    my ($class, $client, $scfg, $config) = @_;
+
+    my $range = $scfg->{ldev_range}
+        or die "ldev_range is not configured\n";
+
+    my ($min, $max) = $class->_parse_ldev_range($range);
 
     # Collect used IDs from ALL LDEVs on the array (not just our pool — IDs are
     # storage-wide) plus any IDs already held in the local registry/reservations,
