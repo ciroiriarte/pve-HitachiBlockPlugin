@@ -471,11 +471,18 @@ sub free_image {
     };
     warn "Snapshot cleanup warning: $@" if $@;
 
-    # Unmap LUN from all host groups
+    # Unmap the LDEV's LUN paths from every host group on every target port.
+    # CM REST GET /luns REQUIRES portId (querying by ldevId alone is rejected,
+    # KART40044-E), so iterate the configured ports; if any path is left mapped
+    # the LDEV delete below fails with "A path is defined in the volume".
     eval {
-        my $luns = $client->list_luns(ldev_id => $ldev_id);
-        for my $lun (@$luns) {
-            $client->unmap_lun($lun->{lunId}) if $lun->{lunId};
+        for my $port_id (split(/,/, $scfg->{target_ports} || '')) {
+            $port_id =~ s/^\s+|\s+$//g;
+            next unless length $port_id;
+            my $luns = $client->list_luns(port_id => $port_id, ldev_id => $ldev_id);
+            for my $lun (@$luns) {
+                $client->unmap_lun($lun->{lunId}) if defined $lun->{lunId};
+            }
         }
     };
     warn "LUN unmap warning: $@" if $@;
