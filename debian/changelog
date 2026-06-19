@@ -1,3 +1,21 @@
+pve-storage-hitachiblock (1.2.0~alpha3-1) stable; urgency=medium
+
+  * Adopt the current PVE storage plugin API (APIVER 14):
+    - api() now returns 14 (was 10); the "older storage API" advisory is gone.
+    - Handle credentials via sensitive properties: plugindata declares
+      `password` sensitive, and on_add_hook/on_update_hook receive it via
+      %sensitive instead of $scfg. This also fixes credential capture, which was
+      already broken on PVE 9 (password is sensitive-by-default, so it never
+      arrived in $scfg). username stays a normal storage.cfg property.
+    - Implement on_update_hook (was missing) so `pvesm set` updates/clears creds.
+    - Declare volume_qemu_snapshot_method => 'storage' (array Thin Image is
+      transparent to the guest). qemu_blockdev_options relies on the base default,
+      correct for our /dev/mapper block path.
+    Verified live on PVE 9.2: plugin loads with no advisory, sensitive_properties
+    reports `password`, daemons restart clean.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Fri, 19 Jun 2026 13:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha2-1) stable; urgency=medium
 
   * Live-PVE bring-up fixes (VSP E590H, PVE 9.2):

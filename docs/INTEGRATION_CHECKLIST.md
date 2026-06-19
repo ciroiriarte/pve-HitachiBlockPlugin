@@ -236,11 +236,18 @@ E590H microcode, so the hardware checks below still apply.
 
 ## Phase 6 — PVE integration & migration
 
-### 6.1 api() version vs target PVE
-- **Assumption:** `api()` returns `10`, within the node's `pve-storage` `APIVER`/`APIAGE` window.
-- **Code:** `HitachiBlockPlugin::api`.
-- **Verify:** `perl -e 'use PVE::Storage::Plugin; print PVE::Storage::Plugin::APIVER, " ", PVE::Storage::Plugin::APIAGE, "\n"'` on the target node; ensure `APIVER - APIAGE <= 10 <= APIVER`. Check `journalctl -u pvedaemon` for "unsupported API" warnings on load.
-- **If wrong:** bump `api()` to the node's `APIVER` after re-checking that the methods this plugin implements still satisfy that version's contract.
+### 6.1 api() version vs target PVE — ✅ CONFIRMED (PVE 9.2, 2026-06-19)
+- **Status:** `api()` returns **14**, matching PVE 9.2's `APIVER 14` (`APIAGE 5`, window 9..14).
+  The plugin loads with **no advisory**; `PVE::Storage::Plugin::sensitive_properties("hitachiblock")`
+  reports `password`. The authoritative API contract is the in-tree `PVE::Storage::Plugin`
+  perldoc — the public wiki is high-level/stale (documents no APIVER, none of the v11–14 methods).
+- **Code:** `HitachiBlockPlugin::api` (=14), `plugindata` (`sensitive-properties`),
+  `on_add_hook`/`on_update_hook` (`%sensitive`), `volume_qemu_snapshot_method` ('storage').
+  `qemu_blockdev_options` uses the base default (driver=host_device for `/dev/mapper/<wwid>`).
+- **Verify on a node:** `perl -e 'use PVE::Storage::Plugin; print PVE::Storage::Plugin::APIVER, "/", PVE::Storage::Plugin::APIAGE, "\n"'`
+  and `journalctl -u pvedaemon` — no "older/unsupported storage API" line after a reload.
+- **If a future PVE raises APIVER:** re-verify overridden method signatures against the new
+  perldoc, then bump `api()` in lockstep (it must stay within `APIVER-APIAGE .. APIVER`).
 
 ### 6.2 Cluster registry lock on real pmxcfs
 - **Assumption:** `cfs_lock_storage` serializes registry writes cluster-wide.

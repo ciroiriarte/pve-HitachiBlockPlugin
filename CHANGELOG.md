@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.2.0~alpha3] - 2026-06-19
+
+> **Alpha pre-release** — adopt the current PVE storage plugin API (APIVER 14),
+> verified live on a PVE 9.2 cluster.
+
+### Changed
+- **Storage API → 14.** `api()` now returns 14 (was 10); the "older storage API,
+  upgrade recommended" advisory no longer fires (api == node APIVER).
+- **Credentials via sensitive properties.** `plugindata` declares `password` as a
+  sensitive property; `on_add_hook`/`on_update_hook` receive it through `%sensitive`
+  rather than `$scfg`. PVE keeps the password out of `storage.cfg` (the plugin
+  persists it to the cluster-private credential file). `username` remains a normal
+  property. Set/update with `pvesm set <storeid> --username u --password p`.
+
+### Fixed
+- **Credential capture on PVE 9.** Because `password` is sensitive-by-default in
+  PVE 9, it never arrived in `$scfg`, so the old `delete $scfg->{password}` captured
+  nothing. Reading it from `%sensitive` fixes credential storage.
+- **Added `on_update_hook`** (was missing) so `pvesm set` can change or clear the
+  stored credentials.
+
+### Added
+- `volume_qemu_snapshot_method` returns `'storage'` — array-side Thin Image
+  snapshots are transparent to a running guest.
+
 ## [1.2.0~alpha2] - 2026-06-19
 
 > **Alpha pre-release** — bring-up fixes from first live install on a PVE 9.2

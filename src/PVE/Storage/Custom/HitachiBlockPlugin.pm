@@ -17,12 +17,15 @@ use POSIX qw(ceil);
 # ── Plugin Identity ──
 
 sub api {
-    # Storage plugin API version this module targets. PVE warns about (and may
-    # disable) plugins whose api() is older than (APIVER - APIAGE) on the running
-    # node; several methods used here (rename_volume, volume_has_feature,
-    # volume_snapshot_info) require >= 10. Reconcile this with the deployment's
-    # pve-storage APIVER/APIAGE before raising it further.
-    return 10;
+    # Storage plugin API version this module targets. PVE 9.x is at APIVER 14
+    # (APIAGE 5, so it accepts 9..14); claiming the current APIVER silences the
+    # "older storage API" advisory. We conform to 14 by: handling credentials via
+    # sensitive properties (plugindata 'sensitive-properties' + %sensitive in the
+    # add/update hooks), declaring volume_qemu_snapshot_method, and relying on the
+    # base qemu_blockdev_options() default (correct for our /dev/mapper block path).
+    # The authoritative contract is the in-tree PVE::Storage::Plugin perldoc, not
+    # the wiki. Bump in lockstep after verifying overridden method signatures.
+    return 14;
 }
 
 sub type {
@@ -33,6 +36,10 @@ sub plugindata {
     return {
         content => [ { images => 1 }, { images => 1 } ],
         format  => [ { raw => 1 }  , 'raw' ],
+        # `password` is a sensitive property: PVE never writes it to storage.cfg
+        # and passes it to the add/update hooks via %sensitive. (username is a
+        # normal property kept in storage.cfg.)
+        'sensitive-properties' => { password => 1 },
     };
 }
 
@@ -206,17 +213,18 @@ sub options {
 # ── Hooks ──
 
 sub on_add_hook {
-    my ($class, $storeid, $scfg, %params) = @_;
+    my ($class, $storeid, $scfg, %sensitive) = @_;
 
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
 
-    # Store credentials if provided
-    my $username = delete $scfg->{username};
-    my $password = delete $scfg->{password};
-
-    if ($username && $password) {
-        $config->store_credentials($username, $password);
-    }
+    # `username` is a normal property (in $scfg); `password` is sensitive and
+    # arrives via %sensitive (never in storage.cfg). Persist both to the
+    # cluster-private credential file for runtime REST auth.
+    my $username = $scfg->{username};
+    my $password = $sensitive{password};
+    die "hitachiblock: 'username' and 'password' are required\n"
+        if !defined $username || !defined $password;
+    $config->store_credentials($username, $password);
 
     # Validate connectivity
     eval {
@@ -232,6 +240,31 @@ sub on_add_hook {
     return;
 }
 
+sub on_update_hook {
+    my ($class, $storeid, $scfg, %sensitive) = @_;
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+
+    # Explicit password clear (`pvesm set --delete password`) removes creds.
+    if (exists $sensitive{password} && !defined $sensitive{password}) {
+        $config->delete_credentials();
+        return;
+    }
+
+    my $username = $scfg->{username};
+    # Use the new password when (re)set, else keep the stored one so a username
+    # change alone still rewrites a complete credential file.
+    my $password = $sensitive{password};
+    if (!defined $password) {
+        $password = eval { (($config->read_credentials())[1]) };
+    }
+
+    $config->store_credentials($username, $password)
+        if defined $username && defined $password;
+
+    return;
+}
+
 sub on_delete_hook {
     my ($class, $storeid, $scfg) = @_;
 
@@ -239,6 +272,14 @@ sub on_delete_hook {
     $config->delete_credentials();
 
     return;
+}
+
+# Our volumes are raw block LUNs and snapshots are taken array-side (Thin
+# Image), transparently to a running guest — qemu does not snapshot the disk
+# itself. (The base default also returns 'storage' for raw; declared explicitly.)
+sub volume_qemu_snapshot_method {
+    my ($class, $storeid, $scfg, $volname) = @_;
+    return 'storage';
 }
 
 # ── Storage Lifecycle ──

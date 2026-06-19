@@ -106,6 +106,17 @@ subtest 'no_duplicate_pve_common_properties' => sub {
         like($opts, qr/^\s*\Q$reserved\E\s*=>/m,
             "options() still references '$reserved'");
     }
+
+    # Modern API: password must be declared sensitive in plugindata, and the
+    # add/update hooks must read it from %sensitive (NOT from $scfg, which PVE
+    # never populates for sensitive properties).
+    my ($pd) = $src =~ /sub\s+plugindata\s*\{(.*?)\n\}/s;
+    like($pd, qr/sensitive-properties.*password/s,
+        "plugindata declares 'password' as a sensitive-property");
+    unlike($src, qr/delete\s+\$scfg->\{password\}/,
+        "hooks do not read password from \$scfg (it is sensitive)");
+    like($src, qr/sub\s+on_update_hook\b/,
+        "on_update_hook is implemented (credential updates)");
 };
 
 subtest 'status_pool_used_logic' => sub {

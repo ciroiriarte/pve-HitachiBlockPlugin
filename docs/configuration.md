@@ -86,12 +86,18 @@ hitachiblock: myarray
 
 ## Credentials
 
-API credentials are stored securely in `/etc/pve/priv/hitachiblock/<storeid>.creds` (cluster-replicated, only readable by root).
+`password` is a **sensitive property** (PVE storage API): PVE never writes it to
+`storage.cfg` and passes it to the plugin's add/update hooks via the `%sensitive`
+channel. `username` is a normal property kept in `storage.cfg`. The plugin persists
+both to `/etc/pve/priv/hitachiblock/<storeid>.creds` (cluster-replicated, root-only)
+for runtime REST authentication.
 
-Set credentials via the PVE storage manager (they are configured during `on_add_hook` or can be updated):
+Set or update credentials via the PVE storage manager (handled by `on_add_hook` at
+creation, `on_update_hook` thereafter):
 
 ```bash
 pvesm set <storeid> --username <api_user> --password <api_password>
+# clear the stored password:  pvesm set <storeid> --delete password
 ```
 
 The credential file is JSON, mode `0600`, readable only by root:
