@@ -143,8 +143,8 @@ so log in for the token and reuse it. Two gotchas verified on FOS 9.2.1b:
   the shell word-splits it and FOS replies `"Invalid auth-type"` (error-code 20).
 - **`cfgadd` semantics via PATCH replaces the whole `member-zone` leaf-list** — GET the cfg's
   current `zone-name` list first and PATCH the *union* (existing + new), or you drop the
-  existing zones. (This is how the E590H bring-up zoning added `pveNN_e590h_*` while
-  preserving the production `dev-mmr-pve-01-…` zones.)
+  existing zones. (Add your new single-initiator zones while preserving every pre-existing
+  production zone in the cfg.)
 
 **a. Record the current checksum** (needed to commit later):
 ```
