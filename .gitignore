@@ -5,3 +5,4 @@ debian/.debhelper/
 debian/pve-storage-hitachiblock/
 build/
 TESTING.md
+t/integration/*.local.md
