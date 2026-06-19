@@ -566,6 +566,43 @@ The plugin automatically re-authenticates on session expiry. If persistent sessi
 - Check if maximum concurrent sessions limit is reached on the Configuration Manager
 - Restart pvedaemon to force a fresh session: `systemctl restart pvedaemon`
 
+### REST session limits (capacity planning)
+
+The Hitachi Configuration Manager REST API allows only a **finite number of concurrent
+sessions**, and this is shared by *every* client of that API — not just this plugin.
+**This is operationally critical:** if the limit is exhausted, the plugin can no longer
+log in and provisioning/status calls fail (typically a "maximum number of sessions" error;
+the FC data path over multipath is unaffected — only the management plane).
+
+How the plugin uses sessions (so you can size the limit):
+
+- **One CM REST session per node, per `hitachiblock` storage.** Each node opens its session
+  in `activate_storage`, **reuses** it for all subsequent calls (with periodic `keepalive`
+  to avoid idle expiry), and **logs out** in `deactivate_storage`. It does *not* log in per
+  operation, so `status()` polling does not multiply sessions.
+- A short-lived extra session is opened during `pvesm add`/`set` (the `on_add_hook`
+  connectivity check) and is logged out immediately.
+
+Budget the array's session limit for roughly:
+
+```
+(number of cluster nodes with the storage active) x (number of hitachiblock storages)
+  + headroom for: transient add/set checks, your own scripts, and OTHER CM clients
+    (Ops Center, Storage Navigator, monitoring, the Maintenance Utility)
+```
+
+If you hit the limit:
+
+- Confirm no external tooling is holding idle CM sessions; close stale ones.
+- Reduce the number of separate `hitachiblock` storages, or split across controllers.
+- On the array, check/raise the CM REST maximum-session setting if your platform allows it.
+- `systemctl restart pvedaemon pvestatd pveproxy` on a node forces its session to be
+  re-established cleanly (the old one is dropped).
+
+> Note: the **SAN switch (Brocade FOS) REST API has its own, separate 3-session default
+> limit** — that is relevant only to the *future* optional FC-zoning automation, not to
+> normal plugin operation, and is tracked in the zoning-automation enhancement issue.
+
 ### Registry Inconsistencies
 
 If the LDEV registry becomes inconsistent with the array state (e.g., after manual array operations):
