@@ -80,14 +80,20 @@ curl -sk -u 'USER:PASS' -H 'Accept: application/yang-data+json' \
 - **RBAC (pp. 36–37):** zoning calls belong to the **`Zoning`** MOF class and run in the
   **VF (Virtual Fabric) context**; chassis-level calls need chassis permissions.
 
-## 3. Virtual Fabrics — pick the logical switch with `vf-id`
+## 3. Virtual Fabrics — pick the logical switch with `?vf-id=<FID>`
 
 With VF enabled, each **logical switch = one fabric**, identified by a **Fabric ID (FID)**.
-Zoning and name-server are **per logical switch**, so add a `vf-id: <FID>` header to target
-the right fabric (e.g. one FID per fabric in a dual-fabric design). List logical switches:
+Zoning and name-server are **per logical switch**, so append a **`?vf-id=<FID>` query
+parameter** to the URL on *every* VF-scoped call (GET, POST, PATCH, DELETE) to target the
+right fabric — e.g. `…/effective-configuration?vf-id=2`.
+
+> **Important (verified on FOS 9.2.1b):** use the **`?vf-id=` query parameter**, not a
+> `vf-id:` *header*. The header is silently ignored — all calls return the *home* VF, so a
+> header-based "FID 2" query returns FID 1's data. The manual shows the query-param form
+> (`…/fabric-switch?vf-id=10`). Omitting it entirely also targets the home VF.
 
 ```
-GET /rest/running/brocade-fibrechannel-logical-switch/fibrechannel-logical-switch
+GET /rest/running/brocade-fibrechannel-logical-switch/fibrechannel-logical-switch   # lists all FIDs (chassis-wide)
 ```
 
 ## 4. Verify fabric logins (name server) — do this before zoning
@@ -96,7 +102,7 @@ The name server lists every device **currently logged into a fabric** (HBA initi
 array targets), so you can confirm cabling/link before zoning and grab exact WWPNs:
 
 ```
-GET /rest/running/brocade-name-server/fibrechannel-name-server   (header: vf-id: <FID>)
+GET /rest/running/brocade-name-server/fibrechannel-name-server?vf-id=<FID>
 ```
 
 Key fields per entry: `port-id` (FCID), `port-name` (the **WWPN**), `node-symbolic-name`
@@ -129,7 +135,16 @@ A standard zone: `zone-type-string: "zone"`, `member-entry.entry-name[]` = a lis
 
 ## 6. Zoning workflow (worked, from pp. 77–89)
 
-All URIs are `…/rest/running/brocade-zone/…`; send the `vf-id` header for the target fabric.
+All URIs are `…/rest/running/brocade-zone/…`; append **`?vf-id=<FID>`** to each for the
+target fabric. Writes (POST/PATCH/DELETE) need a **real session** (session-less is GET-only),
+so log in for the token and reuse it. Two gotchas verified on FOS 9.2.1b:
+- **Quote the token header.** The login returns `Authorization: Custom_Basic <hash>` — the
+  value contains a space, so pass it as one quoted arg: `-H "Authorization: $TOK"`. Unquoted,
+  the shell word-splits it and FOS replies `"Invalid auth-type"` (error-code 20).
+- **`cfgadd` semantics via PATCH replaces the whole `member-zone` leaf-list** — GET the cfg's
+  current `zone-name` list first and PATCH the *union* (existing + new), or you drop the
+  existing zones. (This is how the E590H bring-up zoning added `pveNN_e590h_*` while
+  preserving the production `dev-mmr-pve-01-…` zones.)
 
 **a. Record the current checksum** (needed to commit later):
 ```
