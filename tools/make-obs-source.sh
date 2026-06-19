@@ -26,8 +26,13 @@ UPSTREAM="${FULLVER%-*}"                                              # e.g. 1.2
 # fields pulled from debian/control for the .dsc
 MAINT="$(sed -n 's/^Maintainer: //p' debian/control)"
 STDVER="$(sed -n 's/^Standards-Version: //p' debian/control)"
-BDEPS="$(sed -n 's/^Build-Depends: //p' debian/control | tr -d '\n')"
 BIN="$(sed -n 's/^Package: //p' debian/control | head -1)"
+# Build-Depends may span multiple (indented) continuation lines; fold to one.
+BDEPS="$(awk '
+  /^Build-Depends:/      { g=1; sub(/^Build-Depends:[ \t]*/,""); printf "%s",$0; next }
+  g && /^[ \t]+[^ \t]/   { sub(/^[ \t]+/,"");  printf " %s",$0; next }
+  g                      { exit }
+' debian/control | sed -e 's/[[:space:]]\+/ /g' -e 's/ *, */, /g' -e 's/^ //; s/ $//')"
 
 echo ">> $PKG  upstream=$UPSTREAM  debian=$FULLVER"
 rm -rf "$OUT"
