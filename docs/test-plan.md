@@ -69,6 +69,22 @@ delete, and *orphan-scan* LDEVs. To guarantee it can never touch production:
   is production-adjacent.
 - **S7 — Snapshot the plugin config.** Keep `storage.cfg` under version control on the
   nodes; record every value used in the results log (§Sign-off).
+- **S8 — `ldev_range` is now a code-enforced fence (not just allocation).** The plugin
+  refuses to unmap or delete any LDEV outside `ldev_range` (`_ldev_in_range` guard in
+  `free_image`/`_unmap_lun_from_local`). This is a hard backstop against touching foreign
+  LUNs — but still set a correct `ldev_range`, because with none configured the fence is open.
+- **S9 — Never assume an array query selector filters server-side; prove it live.** Verified
+  on the E590H that **`GET /luns` ignores `ldevId`** (a bogus `ldevId=99999` still returns
+  every LUN in the host group). Destructive code must filter client-side and/or scope to a
+  resource's own children (e.g. unmap via `GET /ldevs/<id>.ports[]`, the LDEV's *own* paths).
+  Before relying on any `?filter=` selector for a destructive operation, test it with a
+  matching value, a non-matching value, and a bogus value and confirm the counts differ.
+
+> **Incident (2026-06-19, recorded for the lesson):** an early `free` relied on the (ignored)
+> `ldevId` selector and scanned all host groups, unmapping 8 *production* fabric-A LUN paths
+> from `dev-mmr-pve-01` before the array's "host I/O" guard halted it. No data was lost (no
+> LDEV deleted; the fabric-B paths stayed up) and the paths were restored. Fixes: client-side
+> `ldevId` filtering, unmap via `ports[]`, and the S8 fence. This is *why* S8/S9 exist.
 
 ---
 
