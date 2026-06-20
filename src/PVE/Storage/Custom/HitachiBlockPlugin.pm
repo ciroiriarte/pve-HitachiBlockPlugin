@@ -100,12 +100,18 @@ sub properties {
         },
         host_mode_options => {
             description => "Comma-separated Hitachi host mode option numbers set on the"
-                . " host groups the plugin creates. Default '68' (Support Page Reclamation"
-                . " for Linux) so SCSI UNMAP/discard is advertised and thin pools reclaim"
-                . " space on in-guest fstrim. Set to '' to disable. Options are added"
-                . " idempotently to existing groups on activation.",
+                . " host groups the plugin creates. Default '2,22,25,68' is Hitachi's"
+                . " best-practice set for the LINUX/IRIX (00 Standard) host mode:"
+                . " 68 = WRITE SAME / SCSI ANSI v5 support (Page Reclamation for Linux,"
+                . " advertises SCSI UNMAP so thin pools reclaim on in-guest fstrim);"
+                . " 2/22/25 = VERITAS Database Edition-Advanced Cluster / Veritas Cluster"
+                . " Server / SPC-3 Persistent Reservation reservation-compatibility. On"
+                . " VSP One Block 2/22/25 are already default-on (no-ops), but they are"
+                . " set explicitly to cover older arrays (VSP E series, VSP 5000) where"
+                . " they are not. Set to '' to disable. Options are added idempotently to"
+                . " existing groups on activation (never removed).",
             type        => 'string',
-            default     => '68',
+            default     => '2,22,25,68',
             optional    => 1,
         },
         platform => {
@@ -1271,9 +1277,12 @@ sub _ensure_host_groups {
 
     my @ports = split(/,/, $scfg->{target_ports} || '');
     my $host_mode = $scfg->{host_mode} || 'LINUX/IRIX';
-    # Host mode options (default '68' = Support Page Reclamation for Linux, which
-    # makes the array advertise SCSI UNMAP so thin pools reclaim on discard/fstrim).
-    my $hmo_cfg = defined $scfg->{host_mode_options} ? $scfg->{host_mode_options} : '68';
+    # Host mode options. Default '2,22,25,68' is Hitachi's best-practice set for the
+    # LINUX/IRIX host mode: 68 (WRITE SAME / SCSI ANSI v5 = Page Reclamation for Linux)
+    # makes the array advertise SCSI UNMAP so thin pools reclaim on discard/fstrim;
+    # 2/22/25 (Veritas DB-Adv Cluster / Veritas Cluster Server / SPC-3 Persistent
+    # Reservation) are default-on on VSP One Block but set explicitly for older arrays.
+    my $hmo_cfg = defined $scfg->{host_mode_options} ? $scfg->{host_mode_options} : '2,22,25,68';
     my @hmo = grep { /^\d+$/ } map { s/^\s+|\s+$//gr } split(/,/, $hmo_cfg);
     my $hostname = `hostname -s`;
     chomp($hostname);

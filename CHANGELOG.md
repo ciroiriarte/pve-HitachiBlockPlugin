@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0~alpha10] - 2026-06-20
+
+> **Alpha pre-release** — adopt Hitachi's best-practice host mode options on
+> auto-created host groups.
+
+### Changed
+- **Default `host_mode_options` is now `2,22,25,68`** (was `68`), the Hitachi
+  best-practice set for the `LINUX/IRIX` (`00 Standard`) host mode, verified
+  against the *Open-Systems Host Attachment Guide for VSP Family* (A3-04-2x,
+  v10.4.x) for both VSP One Block 20 and VSP E series. `68` is *WRITE SAME / SCSI
+  ANSI v5 support* (Page Reclamation for Linux — SCSI UNMAP/discard). `2`/`22`/`25`
+  (VERITAS DB-Adv Cluster / Veritas Cluster Server / SPC-3 Persistent Reservation)
+  are already default-on on VSP One Block but are set explicitly to cover older
+  arrays (VSP E series, VSP 5000) where they are not. Added idempotently to
+  existing groups on activation (never removed). See #7.
+- Corrected the HMO 68 name in code/docs to its current designation ("WRITE SAME
+  command support and SCSI ANSI Version 5 support").
+
 ## [1.2.0~alpha9] - 2026-06-20
 
 > **Alpha pre-release** — completes taint-mode safety; LXC containers now boot

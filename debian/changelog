@@ -1,3 +1,19 @@
+pve-storage-hitachiblock (1.2.0~alpha10-1) stable; urgency=medium
+
+  * Default host_mode_options is now 2,22,25,68 (was 68): Hitachi's best-practice
+    HMO set for the LINUX/IRIX (00 Standard) host mode, verified against the
+    Open-Systems Host Attachment Guide for VSP Family (A3-04-2x, v10.4.x) for both
+    VSP One Block 20 and VSP E series.
+    - 68 = WRITE SAME / SCSI ANSI v5 support (Page Reclamation for Linux: SCSI
+      UNMAP/discard so thin pools reclaim on fstrim).
+    - 2/22/25 = VERITAS DB-Adv Cluster / Veritas Cluster Server / SPC-3 Persistent
+      Reservation. Default-on on VSP One Block, but set explicitly to cover older
+      arrays (VSP E series, VSP 5000) where they are not.
+    Added idempotently to existing host groups on activation (never removed).
+    Corrected the HMO 68 name in code/docs. Closes #7.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 12:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha9-1) stable; urgency=medium
 
   * Taint-mode safety, part 2 (completes LXC container provisioning). After the

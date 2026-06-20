@@ -335,8 +335,9 @@ sub create_host_group {
         hostGroupName => $opts{host_group_name},
         hostMode      => $opts{host_mode} || 'LINUX/IRIX',
     };
-    # Host mode options (integers), e.g. 68 = "Support Page Reclamation for Linux"
-    # (enables UNMAP/discard so thin pools reclaim on fstrim/blkdiscard).
+    # Host mode options (integers), e.g. 68 = "WRITE SAME command support and SCSI
+    # ANSI Version 5 support" (Page Reclamation for Linux: enables UNMAP/discard so
+    # thin pools reclaim on fstrim/blkdiscard).
     $body->{hostModeOptions} = [ map { int($_) } @{$opts{host_mode_options}} ]
         if $opts{host_mode_options} && @{$opts{host_mode_options}};
 
