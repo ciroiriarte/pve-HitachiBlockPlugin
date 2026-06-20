@@ -445,4 +445,26 @@ subtest 'volume_import_formats_logic' => sub {
     is_deeply([$formats->(snapshot => 's')], [], 'no snapshot-specific stream');
 };
 
+subtest 'volume_export_streams_whole_device' => sub {
+    # Regression guard (incident 2026-06-20): a copy onto the storage must stream the
+    # ENTIRE device. Assert volume_export writes the size header and runs dd over the
+    # whole device with NO count=/skip=/seek= that would short-stream/truncate it.
+    my $src = do {
+        local $/;
+        open my $fh, '<', 'src/PVE/Storage/Custom/HitachiBlockPlugin.pm'
+            or die "cannot open plugin source: $!";
+        <$fh>;
+    };
+    my ($body) = $src =~ /sub\s+volume_export\s*\{(.*?)\n\}/s;
+    ok(defined $body, 'found volume_export() body');
+    like($body, qr/write_common_header\s*\(\s*\$fh\s*,\s*\$size\s*\)/,
+        'writes the raw+size header with the full volume size');
+    my ($dd) = $body =~ /run_command\s*\(\s*(\[.*?\])/s;
+    ok(defined $dd, 'volume_export runs dd via run_command');
+    like($dd, qr/if=\$path/, 'dd reads the whole device path');
+    unlike($dd, qr/\bcount=/,  'no count= (would truncate the stream)');
+    unlike($dd, qr/\bskip=/,   'no skip= (would drop the head)');
+    unlike($dd, qr/\bseek=/,   'no seek=');
+};
+
 done_testing();

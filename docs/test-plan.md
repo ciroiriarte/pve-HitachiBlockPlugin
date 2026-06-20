@@ -211,6 +211,26 @@ Goal: the storage_migrate / Move-Storage matrix. Shared LUN ⇒ live migration w
 - F5. **Move Storage** a disk LUN→file store and qcow2→LUN, hot and cold (IC §6.3).
 - F6. Offline-migrate a VM to a **non-SAN** node via export/import; confirm clean failure
   or successful relocation per the documented matrix (IC §6.3).
+- **F7. DATA-INTEGRITY GATE (run after every F1–F6 copy onto `e590h-test`).** A copy that
+  silently truncates passes "the VM booted" only by luck — verify the **bytes**, not just
+  that it ran. After each Move-Storage / migrate / export-import onto the array:
+  - Record the **source** allocated size first (`rbd du` / `qemu-img info`); a real OS disk
+    is GiB, not ~100 MiB.
+  - Compare source vs destination: `cmp` the two device paths, or
+    `sha256sum` a fixed prefix (e.g. first 4 GiB:
+    `dd if=<src> bs=1M count=4096 | sha256sum` vs the same on `/dev/mapper/3<wwid>`), **and**
+    sanity-check the array LDEV's `numOfUsedBlock` is in the GiB range, not ~132 MiB.
+  - For a boot disk, also `fsck`/mount the destination's root + ESP, or boot the guest.
+  - **STOP-gate:** any mismatch (or `numOfUsedBlock` far below the source's allocated size)
+    = a truncated copy — do **not** treat as "guest won't boot."
+
+  > **Why this gate exists (incident 2026-06-20):** a `qm clone --full` (Ceph RBD) + `qm
+  > move-disk` onto `e590h-test` delivered only **132 MiB** of a ~2.1 GiB openSUSE image
+  > (ESP + root were zeros); the guest dropped to GRUB rescue and the failure masqueraded as
+  > a boot/UEFI/network problem for a long time. A direct `qemu-img convert rbd:<src> ->
+  > /dev/mapper/<LUN>` wrote the full image correctly, proving the **plugin** stores writes
+  > intact — the loss was in the Ceph clone/flatten pipeline upstream. This gate catches such
+  > truncation immediately, regardless of where it originates.
 
 ### Phase G — Advanced services (optional / time-permitting)
 - G1. **QoS:** set `qos_upper_iops`, allocate, confirm the cap appears on the LDEV and is
