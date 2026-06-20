@@ -603,6 +603,11 @@ If you hit the limit:
 > limit** — that is relevant only to the *future* optional FC-zoning automation, not to
 > normal plugin operation, and is tracked in the zoning-automation enhancement issue.
 
+> **Scaling past the cap:** the current 1-session-per-node model has a hard ceiling at the
+> CM session limit (e.g. 128 nodes do not fit a 64-session cap). Redesign options for
+> scaling the control plane beyond that are recorded in
+> [ADR 0001 — Control-plane REST session scaling](adr/0001-control-plane-session-scaling.md).
+
 ### Registry Inconsistencies
 
 If the LDEV registry becomes inconsistent with the array state (e.g., after manual array operations):

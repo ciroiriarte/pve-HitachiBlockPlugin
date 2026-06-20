@@ -119,6 +119,15 @@ Additionally, a standalone CLI tool exists for replication management:
 - Example: 3,000 VMs across 10 nodes = ~300 LUNs per host, well within limits
 - **Multi-attach**: When a volume must be accessible from multiple nodes simultaneously (e.g., during live migration overlap or shared-disk clusters), `activate_volume` and `deactivate_volume` track concurrent mappings and only unmap the LUN when the last node deactivates it
 
+## Control-Plane Session Scaling
+
+Each node holds **one persistent CM REST session per `hitachiblock` storage**, so session
+usage scales with cluster size and is bounded by the array's shared CM session cap. This is
+a scaling ceiling for large clusters (see `docs/operations.md` §"REST session limits"). The
+candidate topologies for decoupling session count from node count — ephemeral sessions with
+a cluster-wide lease budget, an active-active broker, and the rejected alternatives — are
+analysed in [ADR 0001 — Control-plane REST session scaling](adr/0001-control-plane-session-scaling.md).
+
 ## State Management
 
 All persistent state is stored under `/etc/pve/priv/hitachiblock/` which is automatically cluster-replicated via pmxcfs:
