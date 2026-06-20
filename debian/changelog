@@ -1,3 +1,19 @@
+pve-storage-hitachiblock (1.2.0~alpha8-1) stable; urgency=medium
+
+  * Taint-mode safety (fixes LXC container provisioning). pct runs the storage
+    layer in Perl taint mode (-T); the Multipath module used tainted data in
+    sensitive operations and died "Insecure dependency in open while running
+    with -T switch", so CT rootfs allocation on the storage failed (VMs via qm,
+    not taint-mode, were unaffected).
+    - rescan_scsi_hosts: untaint the glob()-derived /sys/class/scsi_host/hostN
+      path before the write-open.
+    - rescan_scsi_targeted: untaint the host number parsed from the hctl.
+    - _run_cmd: set a known-good $ENV{PATH}, drop IFS/CDPATH/ENV/BASH_ENV, and
+      untaint argv against a conservative charset before exec.
+    Added a taint-mode regression test (t/unit/taint.t).
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 05:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha7-1) stable; urgency=medium
 
   * Advertise the `rootdir` content type in addition to `images`, so LXC

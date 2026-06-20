@@ -52,7 +52,10 @@ sub rescan_scsi_hosts {
     croak "No SCSI hosts found" unless @hosts;
 
     for my $host_path (@hosts) {
-        my $scan_file = "$host_path/scan";
+        # glob() returns TAINTED paths; pct runs in taint mode (-T), which forbids
+        # write-open on tainted data. Untaint by validating the sysfs shape.
+        next unless $host_path =~ m{^(/sys/class/scsi_host/host\d+)\z};
+        my $scan_file = "$1/scan";
         next unless -w $scan_file;
 
         open(my $fh, '>', $scan_file) or next;
@@ -73,6 +76,9 @@ sub rescan_scsi_targeted {
     croak "hctl is required" unless $hctl;
 
     my ($host, $channel, $target, $lun) = split(/:/, $hctl);
+    # Untaint the host number (taint mode forbids write-open with tainted data).
+    ($host) = ($host // '') =~ /^(\d+)$/
+        or croak "invalid host in hctl '$hctl'";
     my $scan_file = "/sys/class/scsi_host/host${host}/scan";
 
     if (-w $scan_file) {
@@ -330,6 +336,19 @@ sub _read_first_line {
 
 sub _run_cmd {
     my (@cmd) = @_;
+
+    # Taint safety: pct runs the storage layer in taint mode (-T), which refuses
+    # exec with a tainted $ENV{PATH} or tainted argv. Use a known-good PATH and
+    # untaint each argument against a conservative charset. These are internal
+    # command names, flags, device paths and WWIDs we construct — never user
+    # free-text — so validating the shape is sufficient.
+    local $ENV{PATH} = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+    delete @ENV{qw(IFS CDPATH ENV BASH_ENV)};
+    @cmd = map {
+        $_ =~ /^([\w\@%+=:,.\/-]+)$/
+            ? $1
+            : croak "refusing to exec invalid/tainted argument: $_";
+    } @cmd;
 
     # Execute without a shell (list form) to avoid quoting/injection issues and
     # to capture combined stdout/stderr reliably.

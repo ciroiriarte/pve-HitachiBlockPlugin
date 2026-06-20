@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0~alpha8] - 2026-06-20
+
+> **Alpha pre-release** — taint-mode safety; fixes LXC container provisioning.
+
+### Fixed
+- **Containers could not be created** ("Insecure dependency in open while running
+  with -T switch"). `pct` runs the storage layer in Perl **taint mode**; the
+  Multipath module passed tainted data to write-`open`/`exec`. (VMs via `qm` are
+  not taint-mode, so this only affected CTs.) Fixes: untaint the glob-derived
+  `/sys/class/scsi_host/hostN` scan path and the `hctl` host number before
+  write-open; in `_run_cmd` set a known-good `$ENV{PATH}`, drop
+  `IFS`/`CDPATH`/`ENV`/`BASH_ENV`, and untaint argv before `exec`. Added a
+  taint-mode regression test (`t/unit/taint.t`).
+
 ## [1.2.0~alpha7] - 2026-06-20
 
 > **Alpha pre-release** — container support.
