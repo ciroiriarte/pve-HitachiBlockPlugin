@@ -63,18 +63,31 @@ See [prerequisites.md](prerequisites.md) for the complete list of what must be c
 
 ---
 
+> **Install the plugin on *every* node of the cluster — including nodes without
+> FC/SAN connectivity.** `storage.cfg` is cluster-wide (replicated by pmxcfs), so
+> every node's `pvedaemon`/`pvestatd` parses it. A node that is missing the
+> `HitachiBlockPlugin.pm` module cannot resolve the `hitachiblock` type and will
+> **silently drop the storage from its web UI and `pvesm status`** — producing the
+> inconsistent rendering described in GitHub issue #5. Restrict *activation* to
+> SAN-connected nodes with the `nodes=` storage option (see
+> [configuration.md](configuration.md)); nodes outside that list still display the
+> storage (as disabled) but never try to reach the array.
+
 ## Install from Source
 
 ```bash
 cd pve-HitachiBlockPlugin
 sudo make install
-sudo systemctl restart pvedaemon
+sudo systemctl restart pvedaemon pvestatd
+# reload the browser (Ctrl-Shift-R) to pick up the web UI module
 ```
 
 This installs:
 - Plugin module: `/usr/share/perl5/PVE/Storage/Custom/HitachiBlockPlugin.pm`
 - Helper modules: `/usr/share/perl5/PVE/Storage/HitachiBlock/{RestClient,Multipath,Config}.pm`
 - Replication CLI: `/usr/bin/hitachiblock-repl`
+- Web UI module: `/usr/share/pve-manager/js/pve-storage-hitachiblock.js` (and a
+  `<script>` include added to `/usr/share/pve-manager/index.html.tpl`)
 - Example configs: `/usr/share/doc/pve-storage-hitachiblock/`
 
 ## Install from Debian Package
@@ -83,8 +96,12 @@ This installs:
 make deb
 # the .deb is named for the version in version.mk, e.g. pve-storage-hitachiblock_1.2.0-1_all.deb
 sudo dpkg -i ../pve-storage-hitachiblock_*_all.deb
-sudo systemctl restart pvedaemon
+sudo systemctl restart pvedaemon pvestatd
 ```
+
+The `.deb` wires the web UI module into `index.html.tpl` through a dpkg **trigger**,
+so the integration is re-applied automatically whenever `pve-manager` is upgraded
+(which rewrites that template). Reload the browser (Ctrl-Shift-R) after install.
 
 ## Multipath Configuration
 
@@ -118,6 +135,38 @@ multipath -ll          # should list the 3<wwid> map with all FC paths active
 multipath -v3          # detailed path discovery diagnostics
 ```
 
+## Creating the Storage
+
+Once the plugin (and its web UI module) is installed on every node, create the
+storage either from the GUI or the CLI.
+
+### From the web UI
+
+*Datacenter → Storage → Add → **Hitachi Block***. Fill in the management
+endpoint, storage device ID, DP pool, target FC ports, and credentials; set the
+content types and (under *Advanced*) the platform/QoS/host-mode options. Leave
+`Shared` enabled for clustered operation.
+
+> Earlier plugin versions did **not** appear in the *Add* drop-down and the grid
+> showed the raw `hitachiblock` type — that is fixed by the web UI module shipped
+> with this release.
+
+### From the CLI
+
+```bash
+pvesm add hitachiblock <storeid> \
+  --mgmt_ip   <ctl1>,<ctl2> \
+  --storage_id <storageDeviceId> \
+  --pool_id    <dp-pool-id> \
+  --target_ports CL1-A,CL2-A \
+  --username   <api-user> --password <api-pass> \
+  --content    images,rootdir \
+  --shared 1 \
+  --nodes      <san-node-a>,<san-node-b>   # scope activation to SAN-connected nodes
+```
+
+See [configuration.md](configuration.md) for the full option reference.
+
 ## Verify Installation
 
 ```bash
@@ -129,6 +178,16 @@ pvesm status
 # Check for load errors
 journalctl -u pvedaemon --no-pager | tail -20
 ```
+
+### Troubleshooting: storage missing on some nodes
+
+If a `hitachiblock` storage shows on some nodes but is **absent** on others (in
+the GUI or `pvesm status`), the plugin module is not installed on the nodes where
+it is missing. `storage.cfg` is cluster-wide, but each node can only render a type
+whose Perl module it has. **Install the package on those nodes too** and restart
+`pvedaemon pvestatd`. Use `nodes=` to keep activation scoped to SAN-connected
+nodes — that controls *where the array is contacted*, not *where the storage is
+shown*.
 
 > **Before production use:** this plugin's array- and host-facing behaviour is
 > validated against the API specification, not live hardware. Work through
@@ -147,7 +206,13 @@ sudo dpkg -r pve-storage-hitachiblock
 sudo rm /usr/share/perl5/PVE/Storage/Custom/HitachiBlockPlugin.pm
 sudo rm -r /usr/share/perl5/PVE/Storage/HitachiBlock/
 sudo rm /usr/bin/hitachiblock-repl
-sudo systemctl restart pvedaemon
+sudo rm /usr/share/pve-manager/js/pve-storage-hitachiblock.js
+# remove the web UI <script> include from the manager template
+sudo sed -i '\#pve-storage-hitachiblock.js#d' /usr/share/pve-manager/index.html.tpl
+sudo systemctl restart pvedaemon pvestatd
 ```
+
+> The `.deb` removes the web UI module and its `<script>` include automatically
+> (via the package's `prerm`); the manual steps above are only for source installs.
 
 **Note**: Uninstalling the plugin does not remove storage configuration from `storage.cfg` or state files from `/etc/pve/priv/hitachiblock/`. Remove those manually if the storage is no longer needed.

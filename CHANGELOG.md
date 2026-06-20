@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.2.0~alpha12] - 2026-06-20
+
+> **Alpha pre-release** — web UI integration so the storage type is consistent
+> across the cluster and creatable from the GUI.
+
+### Added
+- **Web UI (manager6) integration.** Ships a JS module
+  (`/usr/share/pve-manager/js/pve-storage-hitachiblock.js`) that registers the
+  `hitachiblock` type with the PVE manager UI. The type now renders as
+  **"Hitachi Block"** in *Datacenter → Storage* (instead of the raw
+  `hitachiblock` token) and appears in the **Add** storage drop-down with a full
+  create/edit dialog: management endpoint, storage device ID, DP pool, target FC
+  ports, credentials and content, plus advanced platform / management port /
+  snapshot pool / host-mode / LDEV range / clone speed / QoS / port-scheduler /
+  zero-page reclaim / host-group cleanup / TLS options. The Debian package
+  injects the `<script>` include into `index.html.tpl` via a dpkg **trigger**, so
+  it is re-applied automatically when `pve-manager` is upgraded; `make install`
+  does the same for source installs.
+
+### Documentation
+- **Install the plugin on *all* cluster nodes**, not only SAN-connected ones:
+  `storage.cfg` is cluster-wide, so a node without the module silently drops the
+  storage from its GUI view and `pvesm status`. Use `nodes=` to scope activation
+  to nodes with FC connectivity. Documented in `installation.md` /
+  `configuration.md`, with a troubleshooting note and a `pvesm add hitachiblock`
+  CLI example. (GitHub issue #5)
+
 ## [1.2.0~alpha11] - 2026-06-20
 
 > **Alpha pre-release** — optional LUN-path teardown optimization (HMO 91).

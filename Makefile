@@ -10,6 +10,11 @@ MODULES=$(wildcard $(MODULE_DIR)/*.pm)
 
 CONF_FILES=conf/storage.cfg.example conf/multipath.conf.d/hitachiblock-vsp.conf
 
+# Web UI (manager6) integration
+GUI_SRC=src/www/manager6/hitachiblock.js
+PVE_MANAGER_JS=/usr/share/pve-manager/js
+INDEX_TPL=/usr/share/pve-manager/index.html.tpl
+
 .PHONY: all install clean deb test obs-source
 
 all:
@@ -31,6 +36,19 @@ install:
 	# Documentation
 	install -d $(DESTDIR)/usr/share/doc/$(PACKAGE)
 	install -m 0644 $(CONF_FILES) $(DESTDIR)/usr/share/doc/$(PACKAGE)/
+
+	# Web UI module (served at /pve2/js/pve-storage-hitachiblock.js)
+	install -d $(DESTDIR)$(PVE_MANAGER_JS)
+	install -m 0644 $(GUI_SRC) $(DESTDIR)$(PVE_MANAGER_JS)/pve-storage-hitachiblock.js
+	# For source installs (empty DESTDIR) wire the <script> tag into the live
+	# index template. The .deb does this via a dpkg trigger instead (see
+	# debian/postinst + debian/triggers), so it survives pve-manager upgrades.
+	@if [ -z "$(DESTDIR)" ]; then \
+	  if [ -f "$(INDEX_TPL)" ] && ! grep -q 'pve-storage-hitachiblock.js' "$(INDEX_TPL)"; then \
+	    sed -i '\#pvemanagerlib.js#a\<script type="text/javascript" src="/pve2/js/pve-storage-hitachiblock.js?ver=$(VERSION)"></script>' "$(INDEX_TPL)"; \
+	    echo "Injected Hitachi Block UI <script> into $(INDEX_TPL) (reload the web UI with Ctrl-Shift-R)."; \
+	  fi; \
+	fi
 
 test:
 	prove -Isrc -r t/unit/

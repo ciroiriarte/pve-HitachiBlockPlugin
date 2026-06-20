@@ -110,8 +110,15 @@ each Control Unit spans exactly **256** LDEV ids. `ldev_range 256-511` is exactl
 | Parameter | Typical Value | Description |
 |-----------|---------------|-------------|
 | `shared` | `1` | Must be `1` for clustered operation |
-| `content` | `images` | Content types (always `images` for block storage) |
-| `nodes` | All nodes | Restrict to specific cluster nodes |
+| `content` | `images` | Content types (`images`, and `rootdir` for LXC) |
+| `nodes` | SAN-connected nodes | Restrict **activation** to specific cluster nodes |
+
+> **`nodes` controls activation, not visibility.** The plugin module must be
+> installed on **all** cluster nodes (see [installation.md](installation.md)) — a
+> node without it silently omits the storage from the GUI/`pvesm status`. Set
+> `nodes=` to the SAN-connected nodes so only they contact the array; nodes
+> outside the list still show the storage (disabled) but never activate it. This
+> is the recommended way to handle nodes without FC connectivity.
 
 ## Credentials
 

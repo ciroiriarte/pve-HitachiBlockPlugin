@@ -1,3 +1,23 @@
+pve-storage-hitachiblock (1.2.0~alpha12-1) stable; urgency=medium
+
+  * Web UI (manager6) integration. Ships a JS module installed to
+    /usr/share/pve-manager/js/pve-storage-hitachiblock.js that registers the
+    hitachiblock type with the PVE manager UI: it now renders as "Hitachi Block"
+    in Datacenter -> Storage (instead of the raw hitachiblock token) and appears
+    in the Add storage drop-down with a full create/edit dialog (endpoint,
+    device ID, DP pool, target FC ports, credentials, content, plus advanced
+    platform/QoS/host-mode/LDEV-range/TLS options). The <script> include is
+    injected into index.html.tpl from postinst and re-applied via a dpkg trigger
+    (interest-noawait on the template), so it survives pve-manager upgrades;
+    prerm removes it on package removal.
+  * Docs: require installing the plugin on all cluster nodes (storage.cfg is
+    cluster-wide; a node without the module silently drops the storage from its
+    GUI and pvesm status). nodes= scopes activation to SAN-connected nodes.
+    installation.md/configuration.md updated with a troubleshooting note and a
+    pvesm add hitachiblock CLI example. Addresses GitHub issue #5.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 15:30:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha11-1) stable; urgency=medium
 
   * Add skip_unmap_io_check storage option (boolean, default off): optional
