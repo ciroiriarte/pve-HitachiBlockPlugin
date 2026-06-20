@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.2.0~alpha4] - 2026-06-19
+
+> **Alpha pre-release** — live VSP E590H bring-up (Phase C). First successful
+> end-to-end provisioning on hardware: alloc → LDEV in `ldev_range` → host-group
+> LUN map → multipath over both fabrics → free with clean teardown.
+
+### Fixed
+- **Host-group / WWN provisioning** (none catchable by mocks): resolve the host
+  group by name with idempotent reuse (the create response's resource id is a
+  composite `portId,num`); `add_wwn_to_host_group` now sends `hostGroupNumber`;
+  drop `hostWwnNickname` (rejected by the VSP E REST, `KART40038-E`);
+  `list_host_wwns` uses `/host-wwns?portId=…&hostGroupNumber=…` (the
+  `/host-groups/<id>/host-wwns` subresource 404s).
+- **Cluster-lock self-deadlock (critical):** the registry lock used
+  `cfs_lock_storage($storeid)` — the same corosync lock PVE core already holds
+  around `vdisk_alloc`/`vdisk_free`/`activate`. Re-acquiring it self-deadlocked,
+  so every alloc/free and even browsing the storage in the GUI hung for the lock
+  timeout. Now uses a dedicated `cfs_lock_domain`.
+- **LDEV create:** don't send `isParallelExecutionEnabled` with an explicit
+  `ldevId` (`KART40046-E`).
+- **Free/teardown:** remove the host-side multipath/SCSI paths *before* the array
+  unmap (otherwise "executing host I/O"); unmap via the LDEV's own
+  `GET /ldevs/<id>.ports[]` rather than scanning host groups.
+
+### Security / Safety
+- **`GET /luns` ignores the `ldevId` selector** (verified live — a bogus value
+  still returns every LUN in the host group). `list_luns` now filters by `ldevId`
+  **client-side**, and an **`ldev_range` fence** (`_ldev_in_range`) refuses to
+  unmap or delete any LDEV outside the configured range — the plugin can no longer
+  act on LDEVs it does not own.
+
 ## [1.2.0~alpha3] - 2026-06-19
 
 > **Alpha pre-release** — adopt the current PVE storage plugin API (APIVER 14),

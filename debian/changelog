@@ -1,3 +1,27 @@
+pve-storage-hitachiblock (1.2.0~alpha4-1) stable; urgency=medium
+
+  * Live VSP E590H bring-up hardening (Phase C) — many bugs that only real
+    hardware + a real PVE cluster could surface:
+    - Host-group/WWN provisioning: resolve host group by name + idempotent reuse
+      (the create response's resource id is a composite portId,num we don't parse);
+      add_wwn sends hostGroupNumber; drop hostWwnNickname (rejected, KART40038-E);
+      list_host_wwns uses /host-wwns?portId=..&hostGroupNumber=.. (the subresource 404s).
+    - CRITICAL deadlock: the registry lock used cfs_lock_storage($storeid), the same
+      lock PVE core holds around vdisk_alloc/free/activate — re-acquiring it
+      self-deadlocked, stalling every alloc/free and the GUI for the lock timeout.
+      Now uses a dedicated cfs_lock_domain.
+    - LDEV create: don't combine an explicit ldevId with isParallelExecutionEnabled
+      (KART40046-E).
+    - free: tear down host paths before the array unmap (else "executing host I/O");
+      unmap via the LDEV's own GET /ldevs/<id>.ports[] instead of scanning host groups.
+    - SAFETY: GET /luns IGNORES the ldevId selector (verified live), so filter
+      client-side; add an ldev_range fence (_ldev_in_range) that refuses to
+      unmap/delete any LDEV outside the configured range.
+    Validated on hardware: alloc -> LDEV in ldev_range, host-group LUN map, multipath
+    device over both fabrics; free -> targeted unmap + delete + clean registry.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Fri, 19 Jun 2026 16:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha3-1) stable; urgency=medium
 
   * Adopt the current PVE storage plugin API (APIVER 14):
