@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0~alpha11] - 2026-06-20
+
+> **Alpha pre-release** — optional LUN-path teardown optimization (HMO 91).
+
+### Added
+- **`skip_unmap_io_check` storage option** (boolean, default off). When enabled,
+  adds Hitachi **HMO 91** (*[OpenStack/OpenShift(K8s)] Skip I/O check when LUN
+  path is deleted*) to the plugin's host groups, so the array unmaps a LUN path
+  immediately instead of returning "the LU is executing host I/O" while
+  `multipathd`'s path checker still probes the just-removed device. Safe because
+  the plugin already tears the host side down first (flush + remove the
+  multipath/SCSI device before unmapping); HMO 91 only drops the now-redundant
+  array interlock and skips `free_image`'s retry/backoff. Off by default;
+  available for host mode 00 on VSP One Block 20 / VSP E series.
+
 ## [1.2.0~alpha10] - 2026-06-20
 
 > **Alpha pre-release** — adopt Hitachi's best-practice host mode options on

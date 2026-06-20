@@ -114,6 +114,21 @@ sub properties {
             default     => '2,22,25,68',
             optional    => 1,
         },
+        skip_unmap_io_check => {
+            description => "Teardown optimization: add Hitachi HMO 91 (\"[OpenStack/"
+                . "OpenShift(K8s)] Skip I/O check when LUN path is deleted\") to the"
+                . " plugin's host groups. By default the array refuses to unmap a LUN"
+                . " path while it still detects host I/O on the LU, so free_image must"
+                . " retry with backoff after the host-side device is removed; HMO 91"
+                . " skips that check so the unmap succeeds immediately. Safe because the"
+                . " plugin always tears the host side down first (flush + remove the"
+                . " multipath/SCSI device before unmapping), so no live writes remain by"
+                . " then; HMO 91 only removes the array's now-redundant interlock. Off by"
+                . " default. Available for host mode 00 on VSP One Block 20 / E series.",
+            type        => 'boolean',
+            default     => 0,
+            optional    => 1,
+        },
         platform => {
             description => "Storage platform type. Sets the default API port: 'vsp_one'"
                 . " and 'vsp_e' (e.g. VSP E590H, direct/embedded REST API) use 443;"
@@ -220,6 +235,7 @@ sub options {
         target_ports => { fixed => 1 },
         host_mode    => { optional => 1 },
         host_mode_options => { optional => 1 },
+        skip_unmap_io_check => { optional => 1 },
         platform     => { optional => 1 },
         mgmt_port    => { optional => 1 },
         nodes        => { optional => 1 },
@@ -548,6 +564,8 @@ sub free_image {
             my $lun_id = join(',', $pe->{portId}, $pe->{hostGroupNumber}, $pe->{lun});
             # Right after the host paths are deleted the array can still report
             # "the LU is executing host I/O" for a few seconds; retry with backoff.
+            # (With the skip_unmap_io_check option / HMO 91 set on the host group the
+            # array skips this check and the first attempt succeeds immediately.)
             my $ok = 0;
             for my $try (1 .. 6) {
                 $ok = eval { $client->unmap_lun($lun_id); 1 };
@@ -1284,6 +1302,11 @@ sub _ensure_host_groups {
     # Reservation) are default-on on VSP One Block but set explicitly for older arrays.
     my $hmo_cfg = defined $scfg->{host_mode_options} ? $scfg->{host_mode_options} : '2,22,25,68';
     my @hmo = grep { /^\d+$/ } map { s/^\s+|\s+$//gr } split(/,/, $hmo_cfg);
+    # Optional teardown optimization: HMO 91 ([OpenStack/OpenShift] skip I/O check
+    # when a LUN path is deleted) lets the array unmap immediately instead of
+    # returning "the LU is executing host I/O" while multipathd's path checker
+    # still probes the just-removed device (see free_image's unmap retry loop).
+    push @hmo, 91 if $scfg->{skip_unmap_io_check} && !grep { $_ == 91 } @hmo;
     my $hostname = `hostname -s`;
     chomp($hostname);
 

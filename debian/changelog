@@ -1,3 +1,17 @@
+pve-storage-hitachiblock (1.2.0~alpha11-1) stable; urgency=medium
+
+  * Add skip_unmap_io_check storage option (boolean, default off): optional
+    LUN-path teardown optimization. When set, HMO 91 ([OpenStack/OpenShift(K8s)]
+    Skip I/O check when LUN path is deleted) is added to the plugin's host groups,
+    so the array unmaps a LUN path immediately instead of returning "the LU is
+    executing host I/O" while multipathd's path checker still probes the
+    just-removed device. Safe because the plugin already removes the host-side
+    multipath/SCSI device before unmapping; HMO 91 only drops the now-redundant
+    interlock and skips free_image's retry/backoff. Host mode 00 on VSP One Block
+    20 / E series.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 13:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha10-1) stable; urgency=medium
 
   * Default host_mode_options is now 2,22,25,68 (was 68): Hitachi's best-practice
