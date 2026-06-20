@@ -61,6 +61,7 @@ hitachiblock: myarray
 |-----------|---------|-------------|
 | `snap_pool_id` | Same as `pool_id` | Separate DP pool for snapshot S-VOLs |
 | `host_mode` | `LINUX/IRIX` | Host mode for auto-created host groups |
+| `host_mode_options` | `68` | Comma-separated Hitachi host-mode option numbers set on the plugin's host groups. Default `68` (*Support Page Reclamation for Linux*) makes the array advertise SCSI UNMAP so thin pools reclaim space on in-guest `fstrim`/discard. Added idempotently to existing groups on activation. Set to empty to disable. |
 | `platform` | `vsp_one` | Platform type: `vsp_g`, `vsp_e`, or `vsp_one`. Controls default API port. Use `vsp_e` for VSP E series (e.g. E590H) talking to the embedded/direct REST API. |
 | `mgmt_port` | Auto-detected | API port override. Auto: 443 for `vsp_one`/`vsp_e` (direct/embedded REST), 23451 for `vsp_g` (Ops Center CM server). |
 | `qos_upper_iops` | None | Maximum IOPS limit applied to every new LDEV |

@@ -96,6 +96,16 @@ sub properties {
             default     => 'LINUX/IRIX',
             optional    => 1,
         },
+        host_mode_options => {
+            description => "Comma-separated Hitachi host mode option numbers set on the"
+                . " host groups the plugin creates. Default '68' (Support Page Reclamation"
+                . " for Linux) so SCSI UNMAP/discard is advertised and thin pools reclaim"
+                . " space on in-guest fstrim. Set to '' to disable. Options are added"
+                . " idempotently to existing groups on activation.",
+            type        => 'string',
+            default     => '68',
+            optional    => 1,
+        },
         platform => {
             description => "Storage platform type. Sets the default API port: 'vsp_one'"
                 . " and 'vsp_e' (e.g. VSP E590H, direct/embedded REST API) use 443;"
@@ -201,6 +211,7 @@ sub options {
         snap_pool_id => { optional => 1 },
         target_ports => { fixed => 1 },
         host_mode    => { optional => 1 },
+        host_mode_options => { optional => 1 },
         platform     => { optional => 1 },
         mgmt_port    => { optional => 1 },
         nodes        => { optional => 1 },
@@ -1258,6 +1269,10 @@ sub _ensure_host_groups {
 
     my @ports = split(/,/, $scfg->{target_ports} || '');
     my $host_mode = $scfg->{host_mode} || 'LINUX/IRIX';
+    # Host mode options (default '68' = Support Page Reclamation for Linux, which
+    # makes the array advertise SCSI UNMAP so thin pools reclaim on discard/fstrim).
+    my $hmo_cfg = defined $scfg->{host_mode_options} ? $scfg->{host_mode_options} : '68';
+    my @hmo = grep { /^\d+$/ } map { s/^\s+|\s+$//gr } split(/,/, $hmo_cfg);
     my $hostname = `hostname -s`;
     chomp($hostname);
 
@@ -1280,9 +1295,10 @@ sub _ensure_host_groups {
         }
         if (!$hg) {
             $client->create_host_group(
-                port_id         => $port_id,
-                host_group_name => $hg_name,
-                host_mode       => $host_mode,
+                port_id           => $port_id,
+                host_group_name   => $hg_name,
+                host_mode         => $host_mode,
+                host_mode_options => \@hmo,
             );
             $hg = $client->find_host_group_by_name($port_id, $hg_name);
             die "host group '$hg_name' not found on $port_id after creation\n"
@@ -1290,6 +1306,28 @@ sub _ensure_host_groups {
         }
 
         my $hg_num = $hg->{hostGroupNumber};
+
+        # Reconcile host mode options on the (possibly pre-existing) group: add any
+        # configured option that is missing. Only ADDS — never removes options set
+        # out-of-band. Needed so groups created before host_mode_options existed
+        # still get UNMAP/discard. Best-effort: a failure must not block activation.
+        if (@hmo) {
+            eval {
+                my $info    = $client->get_host_group("$port_id,$hg_num");
+                my @current = @{ $info->{hostModeOptions} || [] };
+                my %have    = map { $_ => 1 } @current;
+                my @missing = grep { !$have{$_} } @hmo;
+                if (@missing) {
+                    my @union = sort { $a <=> $b } keys %{{ map { $_ => 1 } (@current, @hmo) }};
+                    $client->set_host_group_mode(
+                        host_group_id     => "$port_id,$hg_num",
+                        host_mode         => $host_mode,
+                        host_mode_options => \@union,
+                    );
+                }
+            };
+            warn "Host mode option reconcile warning ($port_id,$hg_num): $@" if $@;
+        }
 
         # Register any of our WWNs not already present (idempotent).
         my $existing_wwns = eval {

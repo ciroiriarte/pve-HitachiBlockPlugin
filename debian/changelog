@@ -1,3 +1,23 @@
+pve-storage-hitachiblock (1.2.0~alpha6-1) stable; urgency=medium
+
+  * Live VSP E590H bring-up (Phase D, thin/discard). Enable SCSI UNMAP/discard
+    so thin pools reclaim space on in-guest fstrim / blkdiscard:
+    - Found live: the array advertised lbpme=0 (no UNMAP) on the plugin's LUNs,
+      so blkdiscard/fstrim failed ("Operation not supported") and used capacity
+      never dropped. Root cause: host groups were created with host mode
+      LINUX/IRIX and NO host mode options. Hitachi gates Linux page reclamation
+      behind Host Mode Option 68 ("Support Page Reclamation for Linux").
+    - New `host_mode_options` storage option (default "68"); create_host_group
+      now sends hostModeOptions, and _ensure_host_groups idempotently ADDS the
+      configured options to pre-existing groups at activation (set_host_group_mode
+      PATCHes with hostMode, which the CM REST requires alongside the options).
+    - Verified live: with HMO 68 + a fresh device discovery the LUN reports
+      lbpme=1 and discard_max=256 MiB (42 MiB granularity = DP page); after
+      writing 4 GiB then blkdiscard, the LDEV's numOfUsedBlock returned to 0
+      (array reclaimed all pages, asynchronously over a few minutes).
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 02:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha5-1) stable; urgency=medium
 
   * Live VSP E590H bring-up hardening (Phase D — PVE functional acceptance).

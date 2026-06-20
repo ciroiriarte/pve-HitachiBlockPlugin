@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.2.0~alpha6] - 2026-06-20
+
+> **Alpha pre-release** — live VSP E590H bring-up (Phase D, thin provisioning /
+> discard). Enables SCSI UNMAP so thin pools reclaim on in-guest `fstrim`.
+
+### Fixed
+- **Discard/UNMAP not advertised → thin pools never reclaimed.** The plugin
+  created host groups with no host mode options, so the array reported `lbpme=0`
+  and the host saw `discard_max_bytes=0`; `blkdiscard`/`fstrim` failed with
+  "Operation not supported" and freed space was never returned to the pool.
+  Hitachi gates Linux page reclamation behind **Host Mode Option 68 ("Support
+  Page Reclamation for Linux")**. New `host_mode_options` storage option
+  (default `68`): `create_host_group` sends `hostModeOptions`, and
+  `_ensure_host_groups` idempotently **adds** the configured options to existing
+  groups on activation (`set_host_group_mode` PATCHes with `hostMode`, which the
+  CM REST requires alongside the options). Verified live: with HMO 68 the LUN
+  reports `lbpme=1` / `discard_max=256 MiB` (42 MiB granularity), and after
+  writing 4 GiB then `blkdiscard` the LDEV's `numOfUsedBlock` returned to 0.
+
 ## [1.2.0~alpha5] - 2026-06-20
 
 > **Alpha pre-release** — live VSP E590H bring-up (Phase D, PVE functional

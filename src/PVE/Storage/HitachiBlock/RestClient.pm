@@ -335,8 +335,30 @@ sub create_host_group {
         hostGroupName => $opts{host_group_name},
         hostMode      => $opts{host_mode} || 'LINUX/IRIX',
     };
+    # Host mode options (integers), e.g. 68 = "Support Page Reclamation for Linux"
+    # (enables UNMAP/discard so thin pools reclaim on fstrim/blkdiscard).
+    $body->{hostModeOptions} = [ map { int($_) } @{$opts{host_mode_options}} ]
+        if $opts{host_mode_options} && @{$opts{host_mode_options}};
 
     my $res = $self->_request('POST', $self->_url('/host-groups'), $body);
+    return $self->_wait_for_job($res);
+}
+
+# Set a host group's host mode + host mode options. The CM REST requires hostMode
+# to be present whenever hostModeOptions is changed (else KART40046-E). Used to
+# reconcile host mode options on host groups created before this was set (idempotent
+# at the caller: only PATCH when the desired options are not already present).
+sub set_host_group_mode {
+    my ($self, %opts) = @_;
+
+    croak "host_group_id is required" unless defined $opts{host_group_id};
+    croak "host_mode is required"     unless defined $opts{host_mode};
+
+    my $body = { hostMode => $opts{host_mode} };
+    $body->{hostModeOptions} = [ map { int($_) } @{$opts{host_mode_options}} ]
+        if $opts{host_mode_options};
+
+    my $res = $self->_request('PATCH', $self->_url("/host-groups/$opts{host_group_id}"), $body);
     return $self->_wait_for_job($res);
 }
 

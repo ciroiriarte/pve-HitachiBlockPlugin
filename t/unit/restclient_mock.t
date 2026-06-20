@@ -260,6 +260,41 @@ subtest 'create_host_group_with_host_mode' => sub {
     is($log[0]{body}{portId}, 'CL1-A', 'port in body');
     is($log[0]{body}{hostGroupName}, 'PVE_node1', 'name in body');
     is($log[0]{body}{hostMode}, 'LINUX/IRIX', 'host mode in body');
+    ok(!exists $log[0]{body}{hostModeOptions}, 'no hostModeOptions when none requested');
+};
+
+subtest 'create_host_group_with_host_mode_options' => sub {
+    # HMO 68 (Support Page Reclamation for Linux) must reach the create body so
+    # SCSI UNMAP/discard is advertised; otherwise thin pools never reclaim.
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({ jobId => 'job-hg' }, { state => 'Succeeded', affectedResources => ['/host-groups/5'] });
+
+    $client->create_host_group(
+        port_id           => 'CL1-A',
+        host_group_name   => 'PVE_node1',
+        host_mode         => 'LINUX/IRIX',
+        host_mode_options => [68],
+    );
+    my @log = MockRestClient::get_request_log();
+    is_deeply($log[0]{body}{hostModeOptions}, [68], 'hostModeOptions in create body');
+};
+
+subtest 'set_host_group_mode_patches_with_host_mode' => sub {
+    # The CM REST requires hostMode whenever hostModeOptions is changed (KART40046-E
+    # otherwise) — verified live. PATCH must always carry hostMode.
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({ jobId => 'job-hmo' }, { state => 'Succeeded', affectedResources => [] });
+
+    $client->set_host_group_mode(
+        host_group_id     => 'CL1-A,2',
+        host_mode         => 'LINUX/IRIX',
+        host_mode_options => [68],
+    );
+    my @log = MockRestClient::get_request_log();
+    is($log[0]{method}, 'PATCH', 'uses PATCH');
+    like($log[0]{url}, qr{/host-groups/CL1-A,2}, 'targets the host group');
+    is($log[0]{body}{hostMode}, 'LINUX/IRIX', 'hostMode present (required by the API)');
+    is_deeply($log[0]{body}{hostModeOptions}, [68], 'hostModeOptions in body');
 };
 
 subtest 'add_wwn_sends_hostgroupnumber' => sub {
