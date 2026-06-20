@@ -1,3 +1,19 @@
+pve-storage-hitachiblock (1.2.0~alpha9-1) stable; urgency=medium
+
+  * Taint-mode safety, part 2 (completes LXC container provisioning). After the
+    alpha8 fixes, CT creation still failed because the device PATH the plugin
+    returns to PVE was tainted: PVE runs mkfs.ext4/mount on it via exec, which
+    died "Insecure dependency in exec" under pct's taint mode.
+    - get_device_path: untaint the /dev/mapper/3<wwid> path (a WWID is hex only)
+      before returning it; reject a non-hex wwid.
+    - ldev_to_wwid: untaint the synthesized WWID (built from the storage serial
+      in storage.cfg).
+    Extended t/unit/taint.t to assert get_device_path returns an UNTAINTED path.
+    Verified live: an Alpine CT now provisions and boots with its ext4 rootfs on
+    an array LUN over multipath (mkfs + mount + template extract all succeed).
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 06:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha8-1) stable; urgency=medium
 
   * Taint-mode safety (fixes LXC container provisioning). pct runs the storage

@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.0~alpha9] - 2026-06-20
+
+> **Alpha pre-release** — completes taint-mode safety; LXC containers now boot
+> with their rootfs on an array LUN.
+
+### Fixed
+- **Container mkfs still failed after alpha8** ("Insecure dependency in exec").
+  The device path the plugin returns to PVE was tainted, so PVE's `mkfs.ext4`/
+  `mount` (run via `exec` under `pct`'s taint mode) died. Fixes: `get_device_path`
+  untaints the `/dev/mapper/3<wwid>` path (and rejects a non-hex wwid);
+  `ldev_to_wwid` untaints the synthesized WWID. Verified live: an Alpine CT
+  provisions and runs with its ext4 rootfs on a multipath array LUN.
+
 ## [1.2.0~alpha8] - 2026-06-20
 
 > **Alpha pre-release** — taint-mode safety; fixes LXC container provisioning.

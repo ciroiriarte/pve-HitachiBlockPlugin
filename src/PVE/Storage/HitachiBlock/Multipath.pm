@@ -154,7 +154,13 @@ sub get_device_path {
     my $dm_wwid = $wwid;
     $dm_wwid = "3$wwid" unless $dm_wwid =~ /^3/;
 
-    return "/dev/mapper/$dm_wwid";
+    # Untaint: the wwid comes from the registry file / sysfs (tainted). PVE runs
+    # mkfs/mount on this path via exec, which dies "Insecure dependency" under
+    # pct's taint mode if the path is tainted. A WWID is hex only.
+    $dm_wwid =~ /^(3[0-9a-fA-F]+)$/
+        or croak "invalid multipath wwid '$wwid'";
+
+    return "/dev/mapper/$1";
 }
 
 sub get_device_size {
@@ -280,7 +286,10 @@ sub ldev_to_wwid {
     my $serial_clean = lc($storage_serial);
     $serial_clean =~ s/[^0-9a-f]//g;
 
-    return lc("60060e80${serial_clean}${ldev_hex}0000000000000000");
+    # Untaint: $storage_serial comes from storage.cfg (tainted) and this value is
+    # used to build device paths PVE execs on. The result is hex only.
+    my ($wwid) = lc("60060e80${serial_clean}${ldev_hex}0000000000000000") =~ /^([0-9a-f]+)$/;
+    return $wwid;
 }
 
 # Discover the REAL WWID of a just-mapped LDEV by scanning syssfs, rather than
