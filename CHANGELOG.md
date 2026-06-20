@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.0~alpha7] - 2026-06-20
+
+> **Alpha pre-release** — container support.
+
+### Added
+- **`rootdir` content type** (alongside `images`): LXC containers can now live on
+  the storage — PVE formats and mounts the raw LUN for the container rootfs, like
+  the LVM-thin block model. Default content stays `images`.
+
 ## [1.2.0~alpha6] - 2026-06-20
 
 > **Alpha pre-release** — live VSP E590H bring-up (Phase D, thin provisioning /

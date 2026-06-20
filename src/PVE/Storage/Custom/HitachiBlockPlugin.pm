@@ -48,7 +48,9 @@ sub type {
 
 sub plugindata {
     return {
-        content => [ { images => 1 }, { images => 1 } ],
+        # images = VM disks; rootdir = LXC container rootfs (PVE formats and mounts
+        # the raw LUN, like the LVM-thin block model). Default content = images.
+        content => [ { images => 1, rootdir => 1 }, { images => 1 } ],
         format  => [ { raw => 1 }  , 'raw' ],
         # `password` is a sensitive property: PVE never writes it to storage.cfg
         # and passes it to the add/update hooks via %sensitive. (username is a

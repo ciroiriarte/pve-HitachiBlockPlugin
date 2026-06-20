@@ -1,3 +1,13 @@
+pve-storage-hitachiblock (1.2.0~alpha7-1) stable; urgency=medium
+
+  * Advertise the `rootdir` content type in addition to `images`, so LXC
+    containers can be placed on the storage (PVE formats and mounts the raw
+    LUN for the container rootfs, like the LVM-thin block model). Default
+    content remains `images`. Enables the container half of the PVE storage
+    acceptance matrix (one VM + one CT).
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 04:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha6-1) stable; urgency=medium
 
   * Live VSP E590H bring-up (Phase D, thin/discard). Enable SCSI UNMAP/discard

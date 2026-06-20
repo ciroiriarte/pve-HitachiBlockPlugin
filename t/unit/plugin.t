@@ -122,6 +122,23 @@ subtest 'alloc_size_mb_floor' => sub {
     is($alloc_mb->(100 * 1024 + 512), 101, 'non-MiB-aligned size above floor rounds up to whole MiB');
 };
 
+subtest 'plugindata_content_types' => sub {
+    # The plugin must advertise both images (VM disks) and rootdir (LXC rootfs),
+    # with images as the default, so containers can live on the storage.
+    my $src = do {
+        local $/;
+        open my $fh, '<', 'src/PVE/Storage/Custom/HitachiBlockPlugin.pm'
+            or die "cannot open plugin source: $!";
+        <$fh>;
+    };
+    my ($pd) = $src =~ /sub\s+plugindata\s*\{(.*?)\n\}/s;
+    ok(defined $pd, 'found plugindata() body');
+    my ($content) = $pd =~ /content\s*=>\s*\[(.*?)\]\s*,/s;
+    ok(defined $content, 'found content declaration');
+    like($content, qr/images\s*=>\s*1/,  'advertises images');
+    like($content, qr/rootdir\s*=>\s*1/, 'advertises rootdir (LXC container rootfs)');
+};
+
 subtest 'no_duplicate_pve_common_properties' => sub {
     # Regression guard: PVE common properties (username/password, defined by the
     # base/CIFS/PBS plugins) must NOT be redefined in our properties(), or
