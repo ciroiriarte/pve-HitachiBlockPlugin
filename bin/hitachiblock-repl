@@ -262,7 +262,25 @@ sub cmd_orphans {
     }
 
     my $prefix = PVE::Storage::HitachiBlock::Config->label_prefix($opts{storeid});
-    my $ldevs  = $client->list_ldevs();
+
+    # Scan domain: the default list_ldevs() only returns LDEV slots 0-99, so a
+    # plain scan misses every LDEV in a high ldev_range and would (a) miss array
+    # orphans and (b) FALSELY flag live in-range registry entries as orphans
+    # (their LDEV id is absent from the 0-99 window) — which --auto-cleanup would
+    # then unregister. Page the configured ldev_range; if unset, cover at least
+    # 0..max(registered id) so registry-orphan detection stays sound.
+    my ($scan_min, $scan_max);
+    if (my $r = $scfg->{ldev_range}) {
+        ($scan_min, $scan_max) = $r =~ /^\s*(\d+)\s*-\s*(\d+)\s*$/
+            or die "invalid ldev_range '$r' in storage.cfg\n";
+    } else {
+        $scan_min = 0;
+        $scan_max = 99;
+        for my $id (keys %registered) { $scan_max = $id if $id > $scan_max; }
+        warn "ldev_range not set: scanning LDEVs $scan_min-$scan_max only; "
+           . "array-orphan detection may be incomplete.\n";
+    }
+    my $ldevs = $client->list_defined_ldevs_in_range($scan_min, $scan_max);
 
     my %array_ids;
     my @array_orphans;
@@ -285,8 +303,8 @@ sub cmd_orphans {
     }
 
     # Optionally prune registry entries whose backing LDEV no longer exists. This
-    # is safe because the scan above lists ALL array LDEVs (not just one pool), so
-    # a live volume in any pool is never mistaken for an orphan.
+    # is safe because the scan above pages the whole ldev_range (where the plugin
+    # creates every LDEV), so a live in-range volume is never mistaken for an orphan.
     my $cleaned = 0;
     if ($opts{'auto-cleanup'}) {
         for my $o (@registry_orphans) {

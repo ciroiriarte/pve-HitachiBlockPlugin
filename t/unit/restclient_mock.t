@@ -151,6 +151,47 @@ subtest 'list_ldevs_with_filters' => sub {
     like($log[0]{url}, qr{ldevOption=dpVolume}, 'dp filter in URL');
 };
 
+subtest 'list_defined_ldevs_in_range_pages_and_filters' => sub {
+    # GET /ldevs returns a window of consecutive slots (incl. "NOT DEFINED" empty
+    # ones) starting at headLdevId. The helper must page across the range (the
+    # default window is only 100 wide) and drop empty slots.
+    my $client = new_mock_client();
+    # One chunk (256 wide). Slots 256..511; only 256 and 300 are defined.
+    MockRestClient::set_mock_responses(sub {
+        my ($m, $url) = @_;
+        my @slots;
+        for my $id (256 .. 511) {
+            if ($id == 256) { push @slots, { ldevId => 256, emulationType => 'OPEN-V-CVS', label => 'pve:x:vm-9100-disk-1' }; }
+            elsif ($id == 300) { push @slots, { ldevId => 300, emulationType => 'OPEN-V' }; }
+            else { push @slots, { ldevId => $id, emulationType => 'NOT DEFINED' }; }
+        }
+        return { data => \@slots };
+    });
+
+    my $defined = $client->list_defined_ldevs_in_range(256, 511);
+    is(scalar @$defined, 2, 'only the 2 defined LDEVs returned (empty slots dropped)');
+    is_deeply([sort { $a <=> $b } map { $_->{ldevId} } @$defined], [256, 300], 'correct LDEV ids');
+
+    my @log = MockRestClient::get_request_log();
+    like($log[0]{url}, qr{headLdevId=256}, 'window starts at range min');
+    like($log[0]{url}, qr{count=256}, 'count bounded to the range width');
+};
+
+subtest 'list_defined_ldevs_in_range_multi_chunk' => sub {
+    # A range wider than the chunk size must issue multiple windowed requests.
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses(
+        sub { return { data => [ { ldevId => 0,   emulationType => 'OPEN-V' } ] } },
+        sub { return { data => [ { ldevId => 256, emulationType => 'OPEN-V' } ] } },
+    );
+    my $defined = $client->list_defined_ldevs_in_range(0, 511, chunk => 256);
+    my @log = MockRestClient::get_request_log();
+    is(scalar @log, 2, 'range 0-511 with chunk 256 issues 2 windowed requests');
+    like($log[0]{url}, qr{headLdevId=0&.*count=256|headLdevId=0.*count=256}, 'first window at 0');
+    like($log[1]{url}, qr{headLdevId=256}, 'second window at 256');
+    is(scalar @$defined, 2, 'collects defined LDEVs across chunks');
+};
+
 subtest 'list_luns_filters_ldev_client_side' => sub {
     # CRITICAL safety: GET /luns ignores ldevId server-side and returns ALL LUNs
     # in the host group. list_luns must filter by ldevId client-side, or a caller

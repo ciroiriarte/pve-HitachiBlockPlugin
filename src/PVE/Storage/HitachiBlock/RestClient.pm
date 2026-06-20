@@ -238,6 +238,11 @@ sub list_ldevs {
     my ($self, %filter) = @_;
 
     my @params;
+    # GET /ldevs returns a *window* of consecutive LDEV slots starting at
+    # headLdevId (default 0) for `count` slots (default 100), INCLUDING empty
+    # slots (emulationType "NOT DEFINED"). Pass head_ldev_id to scan a window
+    # that does not start at 0 (the array 503s on very large counts).
+    push @params, "headLdevId=$filter{head_ldev_id}" if defined $filter{head_ldev_id};
     push @params, "poolId=$filter{pool_id}"  if defined $filter{pool_id};
     push @params, "count=$filter{count}"     if defined $filter{count};
     push @params, "ldevOption=dpVolume"      if $filter{dp_only};
@@ -246,6 +251,31 @@ sub list_ldevs {
     my $data = $self->_request('GET', $self->_url("/ldevs$query"));
 
     return $data->{data} || [];
+}
+
+# Page through LDEV slots [$min..$max] and return only DEFINED LDEVs (skipping
+# "NOT DEFINED" empty slots). The default list_ldevs() only sees slots 0-99, so
+# any scan of a high ldev_range (or whole-array orphan detection) MUST page;
+# requesting the whole LDEV space in one call (count=16384) makes the GUM 503.
+sub list_defined_ldevs_in_range {
+    my ($self, $min, $max, %opts) = @_;
+
+    my $chunk = $opts{chunk} || 256;   # 256/512/1000 verified OK; 16384 -> 503
+    my @out;
+    my $head = $min;
+    while ($head <= $max) {
+        my $count = $max - $head + 1;
+        $count = $chunk if $count > $chunk;
+        my $batch = $self->list_ldevs(head_ldev_id => $head, count => $count);
+        for my $ldev (@$batch) {
+            my $id = $ldev->{ldevId};
+            next unless defined $id && $id >= $min && $id <= $max;
+            next if ($ldev->{emulationType} // '') eq 'NOT DEFINED';
+            push @out, $ldev;
+        }
+        $head += $count;
+    }
+    return \@out;
 }
 
 sub set_ldev_label {

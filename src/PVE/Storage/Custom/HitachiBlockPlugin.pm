@@ -14,6 +14,14 @@ use PVE::Tools qw(run_command);
 
 use POSIX qw(ceil);
 
+# Minimum DP-VOL capacity the array will create. Verified live on a VSP E590H:
+# `POST /ldevs` with byteFormatCapacity <= 46 MiB fails the async job with
+# "It cannot create because the capacity is invalid."; >= 47 MiB succeeds. We
+# floor sub-minimum allocations (PVE vTPM state = 4 MiB, EFI vars, tiny disks)
+# to 48 MiB for margin. DP-VOLs are thin, so the floored logical size consumes
+# pool pages only on write — the floor costs ~0 real capacity.
+my $MIN_LDEV_MB = 48;
+
 # ── Plugin Identity ──
 
 sub api {
@@ -362,6 +370,17 @@ sub status {
 
 # ── Image Lifecycle ──
 
+# Convert a PVE size (KiB) to the LDEV size in MiB the array should create.
+# Rounds up to whole MiB and floors to the array minimum so sub-minimum PVE
+# volumes (vTPM = 4 MiB, EFI vars) don't fail with "capacity is invalid".
+# Sizes at/above the minimum are passed through exactly (no rounding).
+sub _alloc_size_mb {
+    my ($class, $size_kib) = @_;
+    my $mb = ceil(($size_kib || 0) / 1024);
+    $mb = $MIN_LDEV_MB if $mb < $MIN_LDEV_MB;
+    return $mb;
+}
+
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
@@ -384,9 +403,9 @@ sub alloc_image {
             if defined $existing_id;
     }
 
-    # Size is in KiB from PVE, convert to MB for Hitachi API
-    my $size_mb = ceil($size / 1024);
-    $size_mb = 1 if $size_mb < 1;
+    # Size is in KiB from PVE; convert to MiB for the Hitachi API and floor tiny
+    # allocations (vTPM/EFI) to the array's minimum DP-VOL size.
+    my $size_mb = $class->_alloc_size_mb($size);
 
     # Create LDEV (with optional LDEV range restriction)
     my %create_opts = (
@@ -1508,8 +1527,12 @@ sub _next_ldev_in_range {
     # storage-wide) plus any IDs already held in the local registry/reservations,
     # so concurrent allocations are far less likely to collide. A residual race is
     # backstopped by the array rejecting a duplicate explicit ldevId on create.
+    # Scan the ldev_range window itself: the default list_ldevs() only returns
+    # slots 0-99, so for any range above that it would see no array LDEVs and
+    # could hand out an ID already used by a foreign (unregistered) LDEV. Page
+    # the range and count only DEFINED LDEVs.
     my %used;
-    my $ldevs = $client->list_ldevs();
+    my $ldevs = $client->list_defined_ldevs_in_range($min, $max);
     for my $ldev (@$ldevs) {
         $used{$ldev->{ldevId}} = 1 if defined $ldev->{ldevId};
     }

@@ -8,6 +8,7 @@ use warnings;
 
 use Test::More;
 use File::Temp qw(tempdir);
+use POSIX qw(ceil);
 
 use lib 'src';
 
@@ -81,6 +82,26 @@ subtest 'ldev_size_mb_logic' => sub {
     # Block count takes precedence over the formatted string when both present.
     is($size->({ blockCapacity => 2097152, byteFormatCapacity => '999.00 G' }), 1024,
        'block count wins over byteFormatCapacity');
+};
+
+subtest 'alloc_size_mb_floor' => sub {
+    # Mirrors _alloc_size_mb: KiB -> MiB (round up), floored to the array minimum.
+    # The E590H rejects DP-VOLs <= 46 MiB ("capacity is invalid."); keep this in
+    # sync with $MIN_LDEV_MB in the plugin.
+    my $MIN_LDEV_MB = 48;
+    my $alloc_mb = sub {
+        my ($kib) = @_;
+        my $mb = POSIX::ceil(($kib || 0) / 1024);
+        $mb = $MIN_LDEV_MB if $mb < $MIN_LDEV_MB;
+        return $mb;
+    };
+    is($alloc_mb->(4096), 48,   'PVE vTPM (4 MiB) floored to the array minimum');
+    is($alloc_mb->(528),  48,   'sub-MiB EFI vars floored to the array minimum');
+    is($alloc_mb->(0),    48,   'zero/undef floored to the array minimum');
+    is($alloc_mb->(48 * 1024), 48,      '48 MiB stays 48 (at the floor)');
+    is($alloc_mb->(49 * 1024), 49,      '49 MiB passes through exactly (no rounding up)');
+    is($alloc_mb->(8 * 1024 * 1024), 8192, '8 GiB passes through exactly');
+    is($alloc_mb->(100 * 1024 + 512), 101, 'non-MiB-aligned size above floor rounds up to whole MiB');
 };
 
 subtest 'no_duplicate_pve_common_properties' => sub {

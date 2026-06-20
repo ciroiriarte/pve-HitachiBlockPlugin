@@ -1,3 +1,27 @@
+pve-storage-hitachiblock (1.2.0~alpha5-1) stable; urgency=medium
+
+  * Live VSP E590H bring-up hardening (Phase D — PVE functional acceptance).
+    Two bugs only a real array + real guest creation could surface:
+    - Tiny-volume allocation (PVE vTPM = fixed 4 MiB, EFI vars) failed with
+      "It cannot create because the capacity is invalid." — the array refuses
+      DP-VOLs below a hard minimum. Probed live: byteFormatCapacity <= 46 MiB
+      fails the async job, >= 47 MiB succeeds. alloc_image now floors
+      sub-minimum requests to 48 MiB (_alloc_size_mb); DP-VOLs are thin so the
+      floored logical size costs ~0 real capacity. Volumes >= 48 MiB unchanged
+      and still sized exactly.
+    - list_ldevs() only returned LDEV slots 0-99 (GET /ldevs is a 100-slot
+      window from headLdevId; count=16384 makes the GUM 503). A scan of any
+      high ldev_range therefore saw NONE of the plugin's own LDEVs, which broke
+      array orphan detection for the range and let `orphans --auto-cleanup`
+      unregister a LIVE in-range volume (its id was absent from the window).
+      Added RestClient::list_defined_ldevs_in_range (pages the range in safe
+      chunks, drops NOT DEFINED empty slots); _next_ldev_in_range and the
+      hitachiblock-repl orphan scan now use it, scoped to ldev_range.
+    Verified live: 8 GiB disk = exactly 8589934592 bytes on the array
+    (size-unit gate); online resize +4G grows LDEV + multipath map to 12 GiB.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 00:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha4-1) stable; urgency=medium
 
   * Live VSP E590H bring-up hardening (Phase C) — many bugs that only real

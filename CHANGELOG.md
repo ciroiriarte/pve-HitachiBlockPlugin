@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.2.0~alpha5] - 2026-06-20
+
+> **Alpha pre-release** — live VSP E590H bring-up (Phase D, PVE functional
+> acceptance). Two bugs that only a real array + real guest creation surfaced.
+
+### Fixed
+- **Tiny-volume allocation (vTPM/EFI) failed "capacity is invalid":** PVE
+  allocates a vTPM state drive as a fixed 4 MiB volume, but the array refuses to
+  create a DP-VOL below a hard minimum. Probed live on the E590H: `POST /ldevs`
+  with `byteFormatCapacity` ≤ 46 MiB fails the async job, ≥ 47 MiB succeeds.
+  `alloc_image` now floors sub-minimum requests to 48 MiB (`_alloc_size_mb`).
+  DP-VOLs are thin, so the floored logical size consumes pool pages only on
+  write. Volumes ≥ 48 MiB are unchanged and still sized exactly.
+- **`list_ldevs()` only saw LDEV slots 0–99 (critical for orphan detection):**
+  `GET /ldevs` returns a 100-slot window from `headLdevId` (default 0), and a
+  full-space request (`count=16384`) makes the GUM return 503. So a scan of any
+  high `ldev_range` saw *zero* of the plugin's own LDEVs. This (a) broke array
+  orphan detection for the configured range and (b) made
+  `hitachiblock-repl orphans --auto-cleanup` capable of unregistering a *live*
+  in-range volume (its id was absent from the 0–99 window). Added
+  `RestClient::list_defined_ldevs_in_range` which pages the range in safe chunks
+  and drops empty (`NOT DEFINED`) slots; `_next_ldev_in_range` and the orphan
+  scan now use it (the scan is scoped to `ldev_range`).
+
+### Verified live (E590H, PVE 9.2)
+- Size-unit gate (IC §2.1): an 8 GiB disk is exactly 8589934592 bytes on the
+  array (`blockCapacity` 16777216 × 512); a 32-char label round-trips.
+- Online resize (D7): `qm resize +4G` grows the LDEV and the multipath map to
+  exactly 12 GiB.
+
 ## [1.2.0~alpha4] - 2026-06-19
 
 > **Alpha pre-release** — live VSP E590H bring-up (Phase C). First successful
