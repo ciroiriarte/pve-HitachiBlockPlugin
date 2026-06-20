@@ -68,13 +68,40 @@ hitachiblock: myarray
 | `qos_lower_iops` | None | Minimum guaranteed IOPS per LDEV (lower bound, min 0) |
 | `qos_lower_mbps` | None | Minimum guaranteed throughput (MB/s) per LDEV (lower bound, min 0) |
 | `qos_priority` | None | QoS priority level: `1` = high, `2` = medium, `3` = low |
-| `ldev_range` | None | Restrict LDEV allocation to a numeric range (e.g., `1000-1999` or `0x3E8-0x7CF`) |
+| `ldev_range` | None | Restrict LDEV allocation to a numeric range (e.g., `1000-1999` or `0x3E8-0x7CF`). Prefer **CU-aligned** ranges — see below. |
 | `discard_zero_page` | `0` | When enabled (`1`), reclaims zero pages on `deactivate_volume` |
 | `port_scheduler` | `0` | When enabled (`1`) and more than two `target_ports` are configured, each volume is mapped to a stable pair of ports chosen deterministically from its LDEV ID, spreading volumes across FC ports while preserving multipath redundancy |
 | `copy_speed` | None | Array-side copy speed for clone/migration operations (integer, 1-15) |
 | `group_delete` | `0` | When enabled (`1`), automatically deletes empty host groups on deactivate |
 | `tls_verify` | `0` | When enabled (`1`), verifies the Configuration Manager TLS certificate. Off by default for the appliance's self-signed cert. |
 | `tls_ca_file` | None | Path to a CA bundle used to verify the API certificate when `tls_verify` is enabled |
+
+### `ldev_range`, Control Units (CU), and scaling
+
+An LDEV id is a **CU:LDEV** pair — `CU = id >> 8`, `LDEV-in-CU = id & 0xFF` — so
+each Control Unit spans exactly **256** LDEV ids. `ldev_range 256-511` is exactly
+**CU 0x01**; `512-767` is CU 0x02; and so on.
+
+- **Reserve by CU.** Set `ldev_range` to whole-CU windows (`CU N = N*256 …
+  N*256+255`). This gives clean multi-tenant separation (a CU per consumer) and
+  pages optimally — the array's `GET /ldevs` window is one CU wide, so allocation
+  and orphan scans cost one REST call per CU. The plugin emits a non-fatal hint
+  if `ldev_range` is not CU-aligned.
+- **How many volumes can a range hold?** One LDEV per virtual disk, so the range
+  width is the volume cap (one CU = 256, CUs 1–8 / `256-2303` = 2048, etc.).
+
+**Scaling envelope (tightest limit first):**
+
+1. **`ldev_range` width** — the deliberate cap you set.
+2. **Host-group LUN paths — ~2048 *concurrently-active* volumes per node.** LUNs
+   are mapped **per node on `activate_volume`** and unmapped on
+   `deactivate_volume` (a volume consumes a host-group LUN slot only on the
+   node(s) actually using it, not on every node). A VSP host group addresses LUN
+   0–2047, and the plugin uses one `PVE_<host>` host group per node per port — so
+   the practical cap is the number of disks **active on a single node at once**,
+   not the cluster-wide total. Cluster-wide volume count can far exceed 2048.
+3. **Array/model max LDEV count** — a model/licensing ceiling (not array-reported
+   via REST); not the binding limit in practice.
 
 ### Standard PVE Parameters
 

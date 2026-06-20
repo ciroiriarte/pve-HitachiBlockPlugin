@@ -24,11 +24,21 @@
   and drops empty (`NOT DEFINED`) slots; `_next_ldev_in_range` and the orphan
   scan now use it (the scan is scoped to `ldev_range`).
 
+### Added
+- **Per-CU `ldev_range` awareness + faster allocation.** An LDEV id is a CU:LDEV
+  pair (256 LDEVs per Control Unit); `ldev_range 256-511` is exactly CU 0x01.
+  `_next_ldev_in_range` now scans the range one CU-sized window at a time and
+  returns the first free id (early termination) instead of paging the whole
+  range — allocation is ~1 REST call when the low end is free, which matters for
+  wide multi-CU ranges. `on_add_hook`/`on_update_hook` emit a non-fatal hint when
+  `ldev_range` is not CU-aligned (clean per-CU reservation pages optimally).
+
 ### Verified live (E590H, PVE 9.2)
 - Size-unit gate (IC §2.1): an 8 GiB disk is exactly 8589934592 bytes on the
   array (`blockCapacity` 16777216 × 512); a 32-char label round-trips.
 - Online resize (D7): `qm resize +4G` grows the LDEV and the multipath map to
-  exactly 12 GiB.
+  exactly 12 GiB. LDEV id is CU:LDEV (CU = id>>8); the id space pages valid
+  through CU 0x7F on this microcode.
 
 ## [1.2.0~alpha4] - 2026-06-19
 

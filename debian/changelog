@@ -19,6 +19,12 @@ pve-storage-hitachiblock (1.2.0~alpha5-1) stable; urgency=medium
       hitachiblock-repl orphan scan now use it, scoped to ldev_range.
     Verified live: 8 GiB disk = exactly 8589934592 bytes on the array
     (size-unit gate); online resize +4G grows LDEV + multipath map to 12 GiB.
+  * Per-CU ldev_range awareness: an LDEV id is a CU:LDEV pair (256 LDEVs/CU;
+    256-511 == CU 0x01). _next_ldev_in_range now scans the range one CU-sized
+    window at a time and returns the first free id (early termination), so
+    allocation is ~1 REST call when the low end is free instead of paging the
+    whole range — relevant for wide multi-CU ranges. The add/update hooks warn
+    (non-fatal) when ldev_range is not CU-aligned.
 
  -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 00:00:00 +0000
 

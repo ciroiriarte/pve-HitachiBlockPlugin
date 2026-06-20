@@ -22,6 +22,12 @@ use POSIX qw(ceil);
 # pool pages only on write — the floor costs ~0 real capacity.
 my $MIN_LDEV_MB = 48;
 
+# An LDEV id is a CU:LDEV pair: CU = id >> 8, ldev-in-CU = id & 0xFF, so each
+# Control Unit spans exactly 256 LDEV ids. A CU-aligned ldev_range reserves
+# whole CUs (clean multi-tenant separation) and pages optimally — the array's
+# GET /ldevs window is one CU wide, so each CU costs exactly one REST call.
+my $LDEVS_PER_CU = 256;
+
 # ── Plugin Identity ──
 
 sub api {
@@ -234,6 +240,8 @@ sub on_add_hook {
         if !defined $username || !defined $password;
     $config->store_credentials($username, $password);
 
+    $class->_warn_if_ldev_range_misaligned($scfg->{ldev_range});
+
     # Validate connectivity
     eval {
         my $client = $class->_get_client($storeid, $scfg);
@@ -269,6 +277,8 @@ sub on_update_hook {
 
     $config->store_credentials($username, $password)
         if defined $username && defined $password;
+
+    $class->_warn_if_ldev_range_misaligned($scfg->{ldev_range});
 
     return;
 }
@@ -1498,6 +1508,34 @@ sub _parse_ldev_range {
     return ($min, $max);
 }
 
+# Describe an ldev_range in CU terms. Returns ($aligned, $first_cu, $last_cu):
+# $aligned is true when the range starts on a CU boundary and ends one id below
+# one (i.e. covers whole CUs). Pure function — no array access.
+sub _ldev_range_cu_info {
+    my ($class, $min, $max) = @_;
+    my $aligned = (($min % $LDEVS_PER_CU) == 0)
+        && ((($max + 1) % $LDEVS_PER_CU) == 0);
+    return ($aligned, int($min / $LDEVS_PER_CU), int($max / $LDEVS_PER_CU));
+}
+
+# Emit an informational hint (never fatal) if ldev_range is not CU-aligned, so
+# operators get clean per-CU reservations and optimal paging. No-op when unset.
+sub _warn_if_ldev_range_misaligned {
+    my ($class, $range) = @_;
+    return unless defined $range && length $range;
+    my ($min, $max) = $class->_parse_ldev_range($range);
+    my ($aligned, $first_cu, $last_cu) = $class->_ldev_range_cu_info($min, $max);
+    return if $aligned;
+    warn sprintf(
+        "hitachiblock: ldev_range %s is not CU-aligned (spans CU 0x%02X-0x%02X "
+      . "partially). For clean per-CU reservation and optimal paging, align to "
+      . "256-LDEV CU boundaries, e.g. CU N = %d-%d.\n",
+        $range, $first_cu, $last_cu,
+        $first_cu * $LDEVS_PER_CU, $first_cu * $LDEVS_PER_CU + $LDEVS_PER_CU - 1,
+    );
+    return;
+}
+
 # SAFETY GUARD: true if $ldev_id is inside the configured ldev_range. With no
 # range configured there is no fence (returns true). Call before ANY destructive
 # op (unmap/delete) so the plugin can never act on an LDEV it does not own — e.g.
@@ -1523,29 +1561,40 @@ sub _next_ldev_in_range {
 
     my ($min, $max) = $class->_parse_ldev_range($range);
 
-    # Collect used IDs from ALL LDEVs on the array (not just our pool — IDs are
-    # storage-wide) plus any IDs already held in the local registry/reservations,
-    # so concurrent allocations are far less likely to collide. A residual race is
-    # backstopped by the array rejecting a duplicate explicit ldevId on create.
-    # Scan the ldev_range window itself: the default list_ldevs() only returns
-    # slots 0-99, so for any range above that it would see no array LDEVs and
-    # could hand out an ID already used by a foreign (unregistered) LDEV. Page
-    # the range and count only DEFINED LDEVs.
-    my %used;
-    my $ldevs = $client->list_defined_ldevs_in_range($min, $max);
-    for my $ldev (@$ldevs) {
-        $used{$ldev->{ldevId}} = 1 if defined $ldev->{ldevId};
-    }
+    # IDs reserved cluster-wide by the local registry — a cheap local read, always
+    # excluded. (A residual cross-node race is backstopped by the array rejecting a
+    # duplicate explicit ldevId on create.)
+    my %reserved;
     if ($config) {
         my $registry = $config->list_registered();
         for my $entry (values %$registry) {
             next unless ref $entry eq 'HASH';
-            $used{$entry->{ldev_id}} = 1 if defined $entry->{ldev_id};
+            $reserved{$entry->{ldev_id}} = 1 if defined $entry->{ldev_id};
         }
     }
 
-    for my $id ($min .. $max) {
-        return $id unless $used{$id};
+    # Scan the range one CU-sized window at a time and return the first free id.
+    # The default list_ldevs() only returns slots 0-99, so a high range must be
+    # paged (and only DEFINED LDEVs count as used — a foreign LDEV in-range must
+    # never be overwritten). Early termination keeps allocation at ~1 REST call
+    # when the low end of the range is free, instead of paging the whole range —
+    # important for wide multi-CU ranges.
+    for (my $head = $min; $head <= $max; $head += $LDEVS_PER_CU) {
+        my $end = $head + $LDEVS_PER_CU - 1;
+        $end = $max if $end > $max;
+
+        my %used = %reserved;
+        my $batch = $client->list_ldevs(head_ldev_id => $head, count => $end - $head + 1);
+        for my $ldev (@$batch) {
+            my $id = $ldev->{ldevId};
+            next unless defined $id;
+            next if ($ldev->{emulationType} // '') eq 'NOT DEFINED';
+            $used{$id} = 1;
+        }
+
+        for my $id ($head .. $end) {
+            return $id unless $used{$id};
+        }
     }
 
     die "No available LDEV IDs in range $range ($min-$max)\n";

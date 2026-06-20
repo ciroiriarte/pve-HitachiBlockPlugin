@@ -84,6 +84,24 @@ subtest 'ldev_size_mb_logic' => sub {
        'block count wins over byteFormatCapacity');
 };
 
+subtest 'ldev_range_cu_alignment' => sub {
+    # Mirrors _ldev_range_cu_info: an LDEV id is CU:LDEV, 256 ids per CU. A range
+    # is CU-aligned when it starts on a CU boundary and ends one id below one.
+    my $LDEVS_PER_CU = 256;
+    my $cu_info = sub {
+        my ($min, $max) = @_;
+        my $aligned = (($min % $LDEVS_PER_CU) == 0)
+            && ((($max + 1) % $LDEVS_PER_CU) == 0);
+        return ($aligned, int($min / $LDEVS_PER_CU), int($max / $LDEVS_PER_CU));
+    };
+    is_deeply([$cu_info->(0, 255)],    [1, 0, 0], '0-255 = whole CU 0 (aligned)');
+    is_deeply([$cu_info->(256, 511)],  [1, 1, 1], '256-511 = whole CU 1 (aligned)');
+    is_deeply([$cu_info->(256, 2303)], [1, 1, 8], '256-2303 = CU 1-8 (aligned)');
+    is((($cu_info->(300, 500))[0]), '', '300-500 is not CU-aligned');
+    is((($cu_info->(256, 510))[0]), '', '256-510 (ends mid-CU) is not aligned');
+    is((($cu_info->(1, 511))[0]),   '', '1-511 (starts mid-CU) is not aligned');
+};
+
 subtest 'alloc_size_mb_floor' => sub {
     # Mirrors _alloc_size_mb: KiB -> MiB (round up), floored to the array minimum.
     # The E590H rejects DP-VOLs <= 46 MiB ("capacity is invalid."); keep this in
