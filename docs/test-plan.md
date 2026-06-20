@@ -140,9 +140,15 @@ Goal: fill in §1 unknowns and confirm prerequisites without changing anything.
 
 ### Phase B — Install & register storage
 Goal: plugin loads and the storage activates cleanly.
-- B1. Install on both SAN nodes from the OBS `PVE_9` repo (README → Quick start); confirm
-  `pvesm` loads the plugin and `journalctl -u pvedaemon` shows no "unsupported API"
-  warning (IC §6.1).
+- B1. Install the plugin from the OBS `PVE_9` repo (README → Quick start) on **every node in
+  the cluster — not only the SAN-connected ones**. `storage.cfg` is cluster-wide, so each
+  node's `pvedaemon`/`pvestatd` parses the whole file; a node missing the
+  `HitachiBlockPlugin.pm` module cannot resolve the `hitachiblock` type and **silently drops
+  the storage from its view** (inconsistent rendering — see GitHub issue #5). Activation is
+  scoped separately by `nodes=` (Phase A `SAN_NODES`); non-SAN nodes will show the storage as
+  `disabled` and never try to activate it. Confirm `pvesm` loads the plugin and
+  `journalctl -u pvedaemon` shows no "unsupported API" warning (IC §6.1). Verify on a non-SAN
+  node that `pvesm status` lists `e590h-test` (as `disabled`) rather than omitting it.
 - B2. Add the §3 stanza; `pvesm set` credentials. `systemctl reload-or-restart pvedaemon`.
 - B3. `pvesm status` → `e590h-test` is `active`; capacity matches the array GUI (IC §2.4).
 - B4. `pvesm scan` / activate; confirm `PVE_<host>` host groups appear **only** on the
