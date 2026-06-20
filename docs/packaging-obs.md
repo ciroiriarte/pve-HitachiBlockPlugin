@@ -40,7 +40,10 @@ script packages from `git HEAD`.
 osc meta prj   home:ciriarte:pve-HitachiBlockPlugin -F packaging/obs/_meta
 osc meta prjconf home:ciriarte:pve-HitachiBlockPlugin -F packaging/obs/_config
 
-# per release
+# per release: bump version.mk + debian/changelog + CHANGELOG.md, commit, then
+git tag -a v<version> -m "<deb-version>"   # tag the release commit (git refs use '-' not '~')
+git push origin master --tags
+
 tools/make-obs-source.sh
 osc co home:ciriarte:pve-HitachiBlockPlugin pve-storage-hitachiblock
 cp build/obs/* home:ciriarte:pve-HitachiBlockPlugin/pve-storage-hitachiblock/
@@ -48,6 +51,10 @@ cd home:ciriarte:pve-HitachiBlockPlugin/pve-storage-hitachiblock/
 osc addremove
 osc commit -m "pve-storage-hitachiblock <version>"
 ```
+
+> **Always tag the release commit.** Tags map the OBS/Debian version (`1.2.0~alpha4-1`)
+> to a git commit; the `~` is illegal in a git ref, so the tag uses `-`
+> (e.g. `v1.2.0-alpha4`). The version is taken from `debian/changelog`.
 
 OBS rebuilds on every commit. Watch progress with:
 
