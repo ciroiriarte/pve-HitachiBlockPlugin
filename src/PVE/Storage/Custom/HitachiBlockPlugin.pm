@@ -28,6 +28,13 @@ my $MIN_LDEV_MB = 48;
 # GET /ldevs window is one CU wide, so each CU costs exactly one REST call.
 my $LDEVS_PER_CU = 256;
 
+# On free, after the host-side device is torn down the array can still report
+# "the LU is executing host I/O" for a while (multipathd's path checker drains),
+# refusing the unmap. Retry the unmap this many times (×3s backoff ≈ 45s) before
+# giving up — long enough to cover a just-stopped, recently-busy guest. With the
+# skip_unmap_io_check option (HMO 91) the first attempt succeeds and this is moot.
+my $UNMAP_IO_RETRIES = 15;
+
 # ── Plugin Identity ──
 
 sub api {
@@ -567,7 +574,7 @@ sub free_image {
             # (With the skip_unmap_io_check option / HMO 91 set on the host group the
             # array skips this check and the first attempt succeeds immediately.)
             my $ok = 0;
-            for my $try (1 .. 6) {
+            for my $try (1 .. $UNMAP_IO_RETRIES) {
                 $ok = eval { $client->unmap_lun($lun_id); 1 };
                 last if $ok;
                 die $@ unless ($@ // '') =~ /host I\/?O/i;

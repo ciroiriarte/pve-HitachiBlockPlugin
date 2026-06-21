@@ -190,7 +190,10 @@ sub remove_device {
 
     # Drop the WWID from /etc/multipath/wwids so the whitelist does not accumulate
     # stale entries (best-effort: -w is unavailable on older multipath-tools).
+    # `multipath -w` only COMMENTS the entry, and repeated activate/free cycles
+    # leave accumulating duplicate "#<wwid>" lines — prune them (the LUN is gone).
     eval { _run_cmd('multipath', '-w', $dm_wwid) };
+    eval { $self->_prune_wwid_entries($dm_wwid) };
 
     # Find and remove underlying SCSI devices
     my @sd_devs = glob("/sys/block/sd*/device/wwid");
@@ -213,6 +216,38 @@ sub remove_device {
             }
         }
     }
+
+    # Let the kernel finish tearing the paths down before the caller unmaps on the
+    # array: while the SCSI devices are still draining, the array reports "the LU
+    # is executing host I/O" and refuses the unmap. Settling here shrinks that
+    # window so the unmap retry loop succeeds sooner (or first try with HMO 91).
+    eval { _run_cmd('udevadm', 'settle', '--timeout=10') };
+
+    return 1;
+}
+
+# Remove every /etc/multipath/wwids line referencing $wwid (commented or active).
+# `multipath -w` comments the entry instead of deleting it, so repeated
+# activate/free cycles pile up duplicate "#<wwid>/" lines; once the LUN is freed
+# the entry is pure cruft. Best-effort, atomic, taint-safe (the path is a
+# constant and the wwid is validated to hex before use).
+sub _prune_wwid_entries {
+    my ($self, $wwid, $file) = @_;
+
+    $file //= '/etc/multipath/wwids';
+    return unless defined $wwid && $wwid =~ /^3?([0-9a-fA-F]+)$/;
+    my $bare = $1;
+    return unless -f $file && -w $file;
+
+    open(my $in, '<', $file) or return;
+    my @keep = grep { !/\Q$bare\E/ } <$in>;
+    close($in);
+
+    my $tmp = "$file.tmp.$$";
+    open(my $out, '>', $tmp) or return;
+    print $out @keep;
+    close($out);
+    rename($tmp, $file) or unlink($tmp);
 
     return 1;
 }

@@ -15,6 +15,13 @@ pve-storage-hitachiblock (1.2.0~alpha12-1) stable; urgency=medium
     GUI and pvesm status). nodes= scopes activation to SAN-connected nodes.
     installation.md/configuration.md updated with a troubleshooting note and a
     pvesm add hitachiblock CLI example. Addresses GitHub issue #5.
+  * Teardown hardening (complements skip_unmap_io_check / HMO 91 for the default,
+    HMO-91-off path): increase the free_image unmap retry tolerance from 6 to 15
+    (x3s backoff ~45s) so a just-stopped, recently-busy guest's LUN unmaps even
+    while the array still reports "executing host I/O"; udevadm settle after
+    deleting the SCSI paths in remove_device to shrink that I/O-draining window;
+    and prune /etc/multipath/wwids on free (multipath -w only comments entries,
+    so repeated activate/free cycles accumulated duplicate "#<wwid>" lines).
 
  -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 20 Jun 2026 15:30:00 +0000
 

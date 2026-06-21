@@ -27,6 +27,16 @@
   `configuration.md`, with a troubleshooting note and a `pvesm add hitachiblock`
   CLI example. (GitHub issue #5)
 
+### Changed
+- **Teardown hardening** (default, HMO‑91‑off path; complements
+  `skip_unmap_io_check`): the `free_image` unmap retry tolerance goes from 6 to
+  **15** (×3 s ≈ 45 s) so a just-stopped, recently-busy guest's LUN unmaps even
+  while the array still reports *"executing host I/O"*; `remove_device` now runs
+  `udevadm settle` after deleting the SCSI paths to shrink that draining window;
+  and `/etc/multipath/wwids` is pruned on free — `multipath -w` only *comments*
+  entries, so repeated activate/free cycles accumulated duplicate `#<wwid>`
+  lines. Unit-tested (`prune_wwid_entries`).
+
 ## [1.2.0~alpha11] - 2026-06-20
 
 > **Alpha pre-release** — optional LUN-path teardown optimization (HMO 91).

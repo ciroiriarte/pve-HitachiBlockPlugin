@@ -111,4 +111,38 @@ subtest 'whitelist_wwid' => sub {
     ok($ok, 'whitelist_wwid does not die when multipath -a fails');
 };
 
+subtest 'prune_wwid_entries' => sub {
+    use File::Temp qw(tempfile);
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+
+    # A wwids file that has accumulated commented duplicates for the freed wwid
+    # plus an ACTIVE entry for a different, still-in-use LUN.
+    my ($fh, $path) = tempfile(UNLINK => 1);
+    print $fh <<'WWIDS';
+# Multipath wwids, Version : 1.0
+#360060e8021a789005060a78900000104/
+#360060e8021a789005060a78900000104/
+/360060e8021a789005060a78900000104/
+#360060e8021a789005060a78900000104/
+/360060e8021a789005060a78900000107/
+WWIDS
+    close($fh);
+
+    $mp->_prune_wwid_entries('360060e8021a789005060a78900000104', $path);
+
+    open(my $rd, '<', $path) or die "reopen: $!";
+    my @lines = <$rd>;
+    close($rd);
+    my $content = join('', @lines);
+    unlike($content, qr/00000104/, 'all freed-wwid lines removed (commented + active + dups)');
+    like($content, qr{/360060e8021a789005060a78900000107/}, 'other LUN\'s active entry preserved');
+    like($content, qr/Version/, 'header preserved');
+
+    # Safe no-ops: missing file / bad wwid must not die.
+    my $ok1 = eval { $mp->_prune_wwid_entries('360060e80abc', '/nonexistent/wwids'); 1 };
+    ok($ok1, 'missing file is a no-op (no die)');
+    my $ok2 = eval { $mp->_prune_wwid_entries('not-hex!', $path); 1 };
+    ok($ok2, 'invalid wwid is a no-op (no die)');
+};
+
 done_testing();
