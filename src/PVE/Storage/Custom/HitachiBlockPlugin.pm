@@ -344,10 +344,23 @@ sub volume_qemu_snapshot_method {
 
 # ── Storage Lifecycle ──
 
-my %_clients;        # cache: storeid -> RestClient
+my %_clients;        # cache: storeid -> RestClient (live session, per process)
+my %_client_scfg;    # cache: storeid -> scfg, so _client can re-establish a
+                     # session when %_clients was cleared mid-process. PVE tracks
+                     # activation in its own $cache->{activated}; if an
+                     # intermediate deactivate_storage clears our client (e.g.
+                     # cloud-init ISO generation activates then deactivates the
+                     # storage at VM start) while PVE still thinks it is
+                     # activated, PVE skips re-activation and a later
+                     # activate_volume would find no client. Remembering the scfg
+                     # lets _client lazily re-login instead of dying. (GitHub #13)
 
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
+
+    # Remember scfg so _client can re-establish a session if our cached client
+    # is later cleared while PVE still considers the storage activated (#13).
+    $_client_scfg{$storeid} = $scfg;
 
     my $client = $class->_get_client($storeid, $scfg);
     $client->login();
@@ -1243,6 +1256,9 @@ sub volume_resize {
 sub check_connection {
     my ($class, $storeid, $scfg) = @_;
 
+    # Remember scfg for a possible lazy re-establish later in this process (#13).
+    $_client_scfg{$storeid} = $scfg;
+
     eval {
         my $client = $class->_get_client($storeid, $scfg);
         $client->login();
@@ -1256,10 +1272,25 @@ sub check_connection {
 }
 
 sub _client {
-    my ($class, $storeid) = @_;
+    my ($class, $storeid, $scfg) = @_;
+
+    $_client_scfg{$storeid} = $scfg if $scfg;
 
     my $client = $_clients{$storeid};
-    die "Storage '$storeid' is not activated\n" unless $client;
+
+    # Lazily (re)establish a session if we have none cached. This happens when
+    # PVE skips re-activation (its $cache->{activated} is still set) after an
+    # intermediate deactivate_storage cleared our client — e.g. cloud-init ISO
+    # generation activates then deactivates the storage during VM start. We can
+    # rebuild from the remembered scfg instead of failing the operation. (#13)
+    if (!$client) {
+        my $sc = $scfg || $_client_scfg{$storeid};
+        die "Storage '$storeid' is not activated\n" unless $sc;
+        $client = $class->_get_client($storeid, $sc);
+        $client->login();
+        $_clients{$storeid} = $client;
+        return $client;
+    }
 
     # Verify session is alive; reconnect if needed
     eval { $client->keepalive() };

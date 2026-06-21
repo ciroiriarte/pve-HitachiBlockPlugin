@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.2.0~alpha14] - 2026-06-21
+
+> **Alpha pre-release** — fixes a VM-start failure exposed by cloud-init drives
+> on the array (the alpha13 feature); found during live VSP E590H retest.
+
+### Fixed
+- **`_client` now lazily re-establishes a REST session instead of dying
+  "Storage is not activated".** PVE tracks storage activation in its own
+  `$cache->{activated}`; if an intermediate `deactivate_storage` clears our
+  cached client while PVE still considers the storage activated, PVE skips
+  re-activation and a later `activate_volume`/`filesystem_path` found no client
+  and failed the whole operation. This is now reproducible at **VM start when the
+  cloud-init drive lives on the array** (alpha13): PVE activates the storage to
+  generate the cloud-init ISO, deactivates it, then activates the boot volume —
+  the second activation is skipped by PVE's cache, so the start died with
+  *"Storage 'X' is not activated"*. The plugin now remembers the `scfg`
+  (`activate_storage` / `check_connection`) and `_client` re-logins on demand
+  when its cache was cleared mid-process. (GitHub issue #13)
+
+### Notes
+- Validated live on the VSP E590H: a VM with **both its boot disk and its
+  cloud-init drive on the array** now starts and applies cloud-init.
+
 ## [1.2.0~alpha13] - 2026-06-21
 
 > **Alpha pre-release** — cloud-init drive support; closes an array-volume leak

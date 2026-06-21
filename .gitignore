@@ -6,3 +6,10 @@ debian/pve-storage-hitachiblock/
 build/
 TESTING.md
 t/integration/*.local.md
+
+# Local agent/orchestration tooling state — never commit (may contain lab specifics).
+# Root-anchored so committed docs/reference/ is unaffected.
+/.claude/
+/.omc/
+/.codex
+/reference/

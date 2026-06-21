@@ -1,3 +1,17 @@
+pve-storage-hitachiblock (1.2.0~alpha14-1) stable; urgency=medium
+
+  * Fix VM-start failure "Storage 'X' is not activated" when the cloud-init drive
+    lives on the array (exposed by the alpha13 cloud-init feature). At VM start
+    PVE activates the storage to generate the cloud-init ISO, deactivates it,
+    then activates the boot volume; PVE's own $cache->{activated} makes it skip
+    the second activate_storage, so our cleared client cache left activate_volume
+    with no session and the start died. _client now remembers the scfg
+    (activate_storage / check_connection) and lazily re-logins when its cache was
+    cleared mid-process instead of dying. Found during the live VSP E590H retest.
+    Addresses GitHub issue #13.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 21 Jun 2026 14:30:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha13-1) stable; urgency=medium
 
   * Support cloud-init drive volumes (vm-<vmid>-cloudinit). parse_volname now
