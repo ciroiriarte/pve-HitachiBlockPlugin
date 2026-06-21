@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.2.0~alpha13] - 2026-06-21
+
+> **Alpha pre-release** — cloud-init drive support; closes an array-volume leak
+> found during live VSP E590H bring-up.
+
+### Fixed
+- **Cloud-init drive volumes (`vm-<vmid>-cloudinit`) are now supported.**
+  `parse_volname` learned the `vm-<vmid>-cloudinit` form (vtype `images`, format
+  `raw`), so the full lifecycle — alloc, map, path, activate and **free** — now
+  accepts the name. Previously `alloc_image` trusted the PVE-supplied name and
+  created an LDEV, but every later call (`parse_volname`/activate/free) rejected
+  it with *"unable to parse volume name"*, so `qm set --delete` could not free the
+  volume and the array LDEV **leaked** (had to be cleaned up by hand). A
+  cloud-init disk is a regular tiny raw LUN once the name parses; the existing
+  48 MiB minimum-LDEV floor already covers its ~4 MiB request, so no special
+  sizing is needed. You can now place the cloud-init drive on the array:
+  `qm set <vmid> --ide2 <hitachiblock-storage>:cloudinit`. (GitHub issue #6)
+
+### Tests
+- Added a `parse_volname_cloudinit` regression subtest covering the
+  `vm-<vmid>-cloudinit` name (vtype/vmid/format), the `vmid_from_volname` prefix
+  match, and rejection of malformed `…-cloudinit` variants.
+
 ## [1.2.0~alpha12] - 2026-06-20
 
 > **Alpha pre-release** — web UI integration so the storage type is consistent

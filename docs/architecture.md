@@ -103,8 +103,16 @@ Additionally, a standalone CLI tool exists for replication management:
 
 ## Volume Naming
 
-- PVE volname: `vm-<VMID>-disk-<SEQ>`
-- LDEV label on array: `pve:<storeid>:vm-<VMID>-disk-<SEQ>`
+PVE volnames recognised by `parse_volname` (all map to vtype `images`, format `raw`):
+
+- `vm-<VMID>-disk-<SEQ>` — a VM/CT virtual disk
+- `base-<VMID>-disk-<SEQ>` — a template/base image (linked-clone parent)
+- `vm-<VMID>-cloudinit` — a VM's cloud-init drive (a tiny raw LUN holding the
+  ISO9660 config image; size floored to the array minimum DP-VOL)
+
+Other details:
+
+- LDEV label on array: `pve:<storeid>:<volname>`
 - The LDEV registry maps volname to LDEV ID and WWID for fast lookup
 
 ## LUN Scaling Strategy

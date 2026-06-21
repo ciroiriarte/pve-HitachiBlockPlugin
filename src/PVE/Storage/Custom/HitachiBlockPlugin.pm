@@ -1730,6 +1730,16 @@ sub parse_volname {
         return ('images', $volname, $1, undef, undef, undef, 'raw');
     }
 
+    # Cloud-init drive: PVE allocates a tiny raw LUN named vm-<vmid>-cloudinit and
+    # writes an ISO9660 config image to the block device. It is a regular raw volume
+    # (size floored to the array minimum by _alloc_size_mb); only the name differs from
+    # a data disk, so the rest of the lifecycle (alloc/map/path/free) needs no special
+    # casing once the name parses. Without this branch alloc_image creates an LDEV that
+    # parse_volname later rejects, leaking the array volume (GitHub #6).
+    if ($volname =~ /^vm-(\d+)-cloudinit$/) {
+        return ('images', $volname, $1, undef, undef, undef, 'raw');
+    }
+
     die "unable to parse volume name '$volname'\n";
 }
 

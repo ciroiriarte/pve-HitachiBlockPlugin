@@ -58,6 +58,39 @@ subtest 'parse_volname_base' => sub {
     is($vmid_from->('vm-300-disk-1'), 300, 'vmid from vm name');
 };
 
+subtest 'parse_volname_cloudinit' => sub {
+    # Faithful mirror of parse_volname, including the cloud-init branch (GitHub #6).
+    # PVE allocates a tiny raw LUN named vm-<vmid>-cloudinit; alloc_image must be able
+    # to create it AND parse/free must accept it, or the array LDEV leaks.
+    my $parse = sub {
+        my ($v) = @_;
+        return ('images', $v, $1, undef, undef, 1, 'raw')
+            if $v =~ /^base-(\d+)-disk-(\d+)$/;
+        return ('images', $v, $1, undef, undef, undef, 'raw')
+            if $v =~ /^vm-(\d+)-disk-(\d+)$/;
+        return ('images', $v, $1, undef, undef, undef, 'raw')
+            if $v =~ /^vm-(\d+)-cloudinit$/;
+        die "unable to parse volume name '$v'\n";
+    };
+
+    my @ci = $parse->('vm-9100-cloudinit');
+    is($ci[0], 'images', 'cloudinit vtype is images');
+    is($ci[1], 'vm-9100-cloudinit', 'cloudinit name preserved');
+    is($ci[2], 9100, 'cloudinit vmid extracted');
+    is($ci[5], undef, 'cloudinit isBase flag unset');
+    is($ci[6], 'raw', 'cloudinit format is raw');
+
+    # vmid_from_volname / list_images evmid regex must also key off the cloudinit name.
+    my $vmid_from = sub { ($_[0] =~ /^(?:vm|base)-(\d+)-/) ? $1 : 0 };
+    is($vmid_from->('vm-9100-cloudinit'), 9100, 'vmid from cloudinit name');
+
+    # Names that must still be rejected (no silent accept-anything).
+    eval { $parse->('vm-100-cloudinit-extra') };
+    ok($@, 'trailing junk after cloudinit rejected');
+    eval { $parse->('vm-cloudinit') };
+    ok($@, 'cloudinit without vmid rejected');
+};
+
 subtest 'ldev_size_mb_logic' => sub {
     # Mirrors _ldev_size_mb: prefer exact block count over formatted string.
     my $size = sub {

@@ -1,3 +1,21 @@
+pve-storage-hitachiblock (1.2.0~alpha13-1) stable; urgency=medium
+
+  * Support cloud-init drive volumes (vm-<vmid>-cloudinit). parse_volname now
+    recognises the vm-<vmid>-cloudinit name (vtype images, format raw), so the
+    full lifecycle (alloc/map/path/activate/free) accepts it. Previously
+    alloc_image trusted the PVE-supplied name and created an LDEV while every
+    later call rejected it ("unable to parse volume name"), so qm set --delete
+    could not free the volume and the array LDEV leaked (manual REST cleanup
+    required). A cloud-init disk is a regular tiny raw LUN once the name parses;
+    the existing 48 MiB minimum-LDEV floor already covers its ~4 MiB request.
+    The cloud-init drive can now live on the array
+    (qm set <vmid> --ide2 <storage>:cloudinit). Found during the live VSP E590H
+    bring-up. Fixes GitHub issue #6.
+  * Test: add parse_volname_cloudinit regression subtest (name/vtype/vmid/format,
+    vmid_from_volname prefix match, rejection of malformed -cloudinit variants).
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 21 Jun 2026 12:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha12-1) stable; urgency=medium
 
   * Web UI (manager6) integration. Ships a JS module installed to
