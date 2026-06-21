@@ -397,7 +397,7 @@ sub deactivate_storage {
 sub status {
     my ($class, $storeid, $scfg, $cache) = @_;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $pool = $client->get_pool($scfg->{pool_id});
 
     # Hitachi Configuration Manager reports DP pool capacities in MB; convert to
@@ -451,7 +451,7 @@ sub alloc_image {
 
     die "unsupported format '$fmt'\n" if $fmt && $fmt ne 'raw';
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
@@ -531,7 +531,7 @@ sub alloc_image {
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase, $format) = @_;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
@@ -658,7 +658,7 @@ sub activate_volume {
 
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
 
     my $target_ldev_id;
     my $wwid;
@@ -721,7 +721,7 @@ sub deactivate_volume {
 
     # Unmap LUN from this node's host group
     eval {
-        my $client = $class->_client($storeid);
+        my $client = $class->_client($storeid, $scfg);
         $class->_unmap_lun_from_local($storeid, $scfg, $client, $target_ldev_id);
 
         # Reclaim zero-filled pages for thin pool space recovery
@@ -809,7 +809,7 @@ sub volume_size_info {
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
@@ -865,7 +865,7 @@ sub volume_snapshot {
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
 
     my ($ldev_id) = $config->lookup_ldev($volname);
@@ -916,7 +916,7 @@ sub volume_snapshot_delete {
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
 
     my ($ldev_id) = $config->lookup_ldev($volname);
@@ -1018,7 +1018,7 @@ sub volume_has_feature {
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snap, $running, $target) = @_;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
@@ -1210,7 +1210,7 @@ sub volume_import {
 sub volume_resize {
     my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
@@ -1782,7 +1782,7 @@ sub create_base {
     my (undef, $name, $vmid, undef, undef, $isBase) = $class->parse_volname($volname);
     die "create_base not possible for base image '$volname'\n" if $isBase;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
 
     my ($ldev_id, $meta) = $config->lookup_ldev($volname);
@@ -1822,7 +1822,7 @@ sub rename_volume {
     $target_volname = $class->find_free_diskname($storeid, $scfg, $target_vmid, $format)
         if !$target_volname;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $target_volname);
     $client->set_ldev_label($ldev_id, $label);
 
@@ -1839,7 +1839,7 @@ sub manage_volume {
     die "ldev_id is required\n" unless defined $ldev_id;
     die "vmid is required\n"    unless defined $vmid;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
@@ -1894,7 +1894,7 @@ sub unmanage_volume {
 
     die "volname is required\n" unless $volname;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
@@ -1926,7 +1926,7 @@ sub volume_snapshot_consistency_group {
 
     die "volnames arrayref is required\n" unless ref $volnames eq 'ARRAY' && @$volnames;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
@@ -2014,7 +2014,7 @@ sub volume_migrate_pool {
     die "volname is required\n"        unless $volname;
     die "target_pool_id is required\n" unless defined $target_pool_id;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
 
     my ($ldev_id, $meta) = $config->lookup_ldev($volname);
@@ -2034,7 +2034,7 @@ sub volume_migrate_pool {
 sub list_orphans {
     my ($class, $storeid, $scfg) = @_;
 
-    my $client = $class->_client($storeid);
+    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $registry = $config->list_registered();
     my $label_prefix = PVE::Storage::HitachiBlock::Config->label_prefix($storeid);

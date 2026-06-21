@@ -1,3 +1,16 @@
+pve-storage-hitachiblock (1.2.0~alpha15-1) stable; urgency=medium
+
+  * Complete the alpha14 fix: pass scfg into _client at every call site so each
+    volume operation can re-establish a REST session on its own. alpha14 kept
+    scfg in a process-global stash, but PVE generates the cloud-init ISO in a
+    separate forked process at VM start, leaving the start worker's stash empty
+    so activate_volume still died "Storage 'X' is not activated". Every storage
+    method already receives scfg, so _client($storeid, $scfg) now logs in
+    independently of prior in-process activation (robust across the fork).
+    Addresses GitHub issue #13.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 21 Jun 2026 15:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha14-1) stable; urgency=medium
 
   * Fix VM-start failure "Storage 'X' is not activated" when the cloud-init drive

@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0~alpha15] - 2026-06-21
+
+> **Alpha pre-release** — completes the alpha14 cloud-init-on-array VM-start fix.
+
+### Fixed
+- **Pass `scfg` into `_client` at every call site so volume operations
+  re-establish a REST session on their own.** alpha14 remembered `scfg` in a
+  process-global stash, but at VM start PVE generates the cloud-init ISO in a
+  **separate (forked) process**, so the start worker's stash was empty and
+  `activate_volume` still died *"Storage 'X' is not activated"*. Every storage
+  method already receives `scfg` as a parameter, so `_client($storeid, $scfg)`
+  now lets each operation log in independently of any prior in-process
+  activation — robust across the fork. The alpha14 stash remains as a secondary
+  fallback. (GitHub issue #13)
+
 ## [1.2.0~alpha14] - 2026-06-21
 
 > **Alpha pre-release** — fixes a VM-start failure exposed by cloud-init drives
