@@ -35,6 +35,10 @@ using the plugin against any real array.
     LDEV/labels, Thin Image CoW/clone semantics, NAA/WWID, dual-controller/ALUA.
   - [`ops-center-common-services-extract.md`](reference/ops-center-common-services-extract.md)
     — Ops Center auth (mostly *not* our direct-to-array path).
+  - [`ops-center-administrator-rest-api-extract.md`](reference/ops-center-administrator-rest-api-extract.md)
+    — Ops Center **Administrator** REST API (multi-array management server,
+    server/zoning model, create-attach-protect, async jobs) — reference for a
+    **future, not-yet-built** Ops Center connector backend.
   - [`fos-rest-api-extract.md`](reference/fos-rest-api-extract.md) — Brocade Fabric OS
     REST API: login/sessions, Virtual Fabrics (`vf-id`), name-server, and the **FC zoning**
     transaction model — for scripting/verifying the zoning prerequisite during bring-up

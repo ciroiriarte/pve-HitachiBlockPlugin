@@ -1,3 +1,4 @@
-# Vendor reference PDFs are copyrighted and kept locally only.
+# Vendor reference docs (PDF/HTML) are copyrighted and kept locally only.
 # Track the extracted markdown summaries instead.
 *.pdf
+*.html
