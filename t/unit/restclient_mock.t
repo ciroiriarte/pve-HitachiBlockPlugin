@@ -395,7 +395,11 @@ subtest 'restore_snapshot_sends_action' => sub {
 
     my @log = MockRestClient::get_request_log();
     like($log[0]{url}, qr{/snapshots/snap-123/actions/restore/invoke}, 'restore URL');
-    is($log[0]{body}{parameters}{operationType}, 'restore', 'restore operation');
+    # The array rejects an `operationType` attribute (KART40038-E); the restore
+    # action body must be an empty parameters object. See GitHub #22.
+    is(ref $log[0]{body}{parameters}, 'HASH', 'restore body has a parameters object');
+    ok(!exists $log[0]{body}{parameters}{operationType}, 'restore body has NO operationType (#22)');
+    is(scalar keys %{ $log[0]{body}{parameters} }, 0, 'restore parameters is empty');
 };
 
 # ── QoS Operations ──

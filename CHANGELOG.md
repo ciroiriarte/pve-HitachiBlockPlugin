@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.0~alpha16] - 2026-06-21
+
+> **Alpha pre-release** — fixes snapshot rollback, found during the live VSP
+> E590H Phase E (snapshots) bring-up.
+
+### Fixed
+- **Snapshot rollback (`qm rollback`) now succeeds on the array.**
+  `RestClient::restore_snapshot` sent `{"parameters":{"operationType":"restore"}}`,
+  copying the *format* action's body shape. The Thin Image restore action does not
+  accept `operationType`: the E590H (microcode 93-07-23) rejected every restore
+  with `KART40038-E` ("an unsupported parameter is specified … operationType"), so
+  rollback failed outright on both the registry-direct and group-search paths and
+  left the VM with a stale `lock: rollback`. The restore body is now an empty
+  `{"parameters":{}}` (the form the array accepts — verified live: a bare `{}`
+  fails with `KART40046-E`, and `{"parameters":{}}` succeeds and reverts the data).
+  (GitHub issue #22)
+
 ## [1.2.0~alpha15] - 2026-06-21
 
 > **Alpha pre-release** — completes the alpha14 cloud-init-on-array VM-start fix.

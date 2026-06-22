@@ -580,11 +580,12 @@ sub restore_snapshot {
 
     croak "snapshot_id is required" unless defined $snapshot_id;
 
-    my $body = {
-        parameters => {
-            operationType => 'restore',
-        },
-    };
+    # The restore action takes an EMPTY parameters object. This microcode (E590H
+    # 93-07-23) rejects an `operationType` attribute with KART40038-E ("unsupported
+    # parameter ... operationType"), and rejects a bare {} with KART40046-E
+    # ("required parameters not specified"); {"parameters":{}} is the form the array
+    # accepts (confirmed live). See GitHub #22.
+    my $body = { parameters => {} };
 
     my $res = $self->_request('POST', $self->_url("/snapshots/$snapshot_id/actions/restore/invoke"), $body);
     return $self->_wait_for_job($res);

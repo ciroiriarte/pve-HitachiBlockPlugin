@@ -1,3 +1,14 @@
+pve-storage-hitachiblock (1.2.0~alpha16-1) stable; urgency=medium
+
+  * Fix snapshot rollback (qm rollback) on the array. restore_snapshot sent
+    {"parameters":{"operationType":"restore"}}; the Thin Image restore action
+    rejects operationType (KART40038-E on E590H microcode 93-07-23), so rollback
+    failed on both the direct and fallback paths and left a stale lock:rollback.
+    The body is now an empty {"parameters":{}} (verified live on the E590H).
+    Addresses GitHub issue #22.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 21 Jun 2026 19:30:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha15-1) stable; urgency=medium
 
   * Complete the alpha14 fix: pass scfg into _client at every call site so each
