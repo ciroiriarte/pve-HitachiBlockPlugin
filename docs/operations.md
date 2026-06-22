@@ -112,7 +112,12 @@ the plugin. It creates a **CoW Thin Image S-VOL** that shares blocks with its so
 A full/independent copy is **not** produced by `clone_image`. PVE core copies the data
 itself via the block-device path (`alloc_image` on the target + `qemu-img convert`
 offline, or drive-mirror online) — the same machinery as "Move Storage". The result is
-an independent volume with no dependency on the source.
+an independent volume with no dependency on the source. Because the copy runs on the PVE
+host, expect host CPU/IO load and double SAN traffic; **the array cannot offload a full
+clone** (no PVE plugin hook exists). For instant, space-efficient copies use a linked
+clone from a template/base or snapshot instead. Rationale and the (upstream-dependent)
+future options are recorded in
+[ADR 0002 — Full-clone offload](adr/0002-full-clone-offload.md).
 
 ### Clone from Snapshot
 

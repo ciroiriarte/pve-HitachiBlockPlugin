@@ -205,7 +205,9 @@ be a base image or a snapshot.
 A full/independent copy does **not** go through `clone_image`. Proxmox allocates a new
 volume (`alloc_image`) on the target and copies the data itself over the device path
 (`qemu-img convert` offline, or drive-mirror online) — the same machinery as "Move
-Storage". The result has no dependency on the source. See
+Storage". The result has no dependency on the source. **Array-side offload of a full
+clone is not possible** — PVE exposes no plugin hook for it; see
+[ADR 0002 — Full-clone offload](adr/0002-full-clone-offload.md) and
 [Operations § Clones](operations.md#clones).
 
 ### Volume Resize
