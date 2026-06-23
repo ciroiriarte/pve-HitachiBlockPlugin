@@ -230,6 +230,15 @@ sub properties {
             type        => 'string',
             optional    => 1,
         },
+        rest_keepalive => {
+            description => "Keep a persistent Configuration Manager REST session per process"
+                . " instead of authenticating each request (session-less, the default)."
+                . " Session-less avoids exhausting the array's per-array session cap on"
+                . " large clusters; enable this only if your array requires session auth.",
+            type        => 'boolean',
+            default     => 0,
+            optional    => 1,
+        },
     };
 }
 
@@ -263,6 +272,7 @@ sub options {
         group_delete      => { optional => 1 },
         tls_verify        => { optional => 1 },
         tls_ca_file       => { optional => 1 },
+        rest_keepalive    => { optional => 1 },
     };
 }
 
@@ -1303,7 +1313,7 @@ sub _client {
 }
 
 sub _get_client {
-    my ($class, $storeid, $scfg) = @_;
+    my ($class, $storeid, $scfg, %opts) = @_;
 
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my ($username, $password) = $config->read_credentials();
@@ -1311,6 +1321,18 @@ sub _get_client {
     my $platform = $scfg->{platform} || 'vsp_one';
     my $defaults = PVE::Storage::HitachiBlock::Config->platform_defaults($platform);
     my $port = $scfg->{mgmt_port} || $defaults->{port};
+
+    # Default to session-less auth (HTTP basic auth per request). Configuration
+    # Manager caps concurrent REST sessions per array (~64); the previous model
+    # kept one persistent session alive per worker process, so every pvedaemon/
+    # pveproxy/pvestatd worker on every node held a session — O(workers x nodes),
+    # which exhausts the cap on a modest cluster and stalls the control plane
+    # (status() balloons, pvestatd hangs). With session-less auth the array opens
+    # and immediately releases a transient session per request, so nothing
+    # accumulates. Opt back into a kept-alive per-process session with
+    # `rest_keepalive 1`. (GitHub #26)
+    my $sessionless = defined $opts{sessionless} ? $opts{sessionless}
+                    : !$scfg->{rest_keepalive};
 
     return PVE::Storage::HitachiBlock::RestClient->new(
         mgmt_ip     => $scfg->{mgmt_ip},
@@ -1320,6 +1342,7 @@ sub _get_client {
         password    => $password,
         tls_verify  => $scfg->{tls_verify},
         tls_ca_file => $scfg->{tls_ca_file},
+        sessionless => $sessionless,
     );
 }
 

@@ -77,6 +77,7 @@ hitachiblock: myarray
 | `group_delete` | `0` | When enabled (`1`), automatically deletes empty host groups on deactivate |
 | `tls_verify` | `0` | When enabled (`1`), verifies the Configuration Manager TLS certificate. Off by default for the appliance's self-signed cert. |
 | `tls_ca_file` | None | Path to a CA bundle used to verify the API certificate when `tls_verify` is enabled |
+| `rest_keepalive` | `0` | REST authentication mode. **Default (`0`) is session-less**: each request authenticates with HTTP basic auth and the array opens/releases a transient Configuration Manager session per request, so the plugin holds **no** persistent session. This avoids exhausting the array's per-array CM session cap (~64) on larger clusters — the previous model kept one session alive per worker process (`pvedaemon`/`pveproxy`/`pvestatd`), i.e. *workers × nodes* sessions, which could exceed the cap and stall `status()`/`pvestatd`. Set to `1` only if your array/microcode requires session-based auth; it restores a kept-alive per-process session (with login/keepalive/logout). |
 
 ### `ldev_range`, Control Units (CU), and scaling
 

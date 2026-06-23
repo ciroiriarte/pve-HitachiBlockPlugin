@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.2.0~alpha17] - 2026-06-23
+
+> **Alpha pre-release** — fixes Configuration Manager REST session exhaustion,
+> a cluster-scaling blocker found during the live VSP E590H bring-up.
+
+### Changed
+- **Session-less REST auth is now the default**, eliminating per-process session
+  accumulation. The plugin previously kept one Configuration Manager session
+  alive per worker process (`pvedaemon`/`pveproxy`/`pvestatd`), so the number of
+  held sessions grew as *workers × cluster nodes*. CM caps concurrent sessions
+  per array (~64), so a modest cluster exhausted the cap, after which every
+  storage operation failed to authenticate; before that, the session pressure
+  stalled `status()` (and thus `pvestatd` and the node's storage API). Requests
+  now authenticate with HTTP basic auth and the array opens/releases a transient
+  session per request, so **nothing accumulates** — session count is bounded by
+  in-flight requests, independent of cluster size. `login()`/`logout()`/
+  `keepalive()` become no-ops in this mode; failover across controller endpoints
+  still works (basic auth is host-independent). Verified live on the E590H that
+  the GUM accepts basic auth across the full REST surface (GET/POST/PATCH/DELETE
+  + async job polling). Set **`rest_keepalive 1`** in the storage config to opt
+  back into a persistent per-process session. (GitHub issue #26)
+
 ## [1.2.0~alpha16] - 2026-06-21
 
 > **Alpha pre-release** — fixes snapshot rollback, found during the live VSP

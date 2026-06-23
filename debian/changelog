@@ -1,3 +1,16 @@
+pve-storage-hitachiblock (1.2.0~alpha17-1) stable; urgency=medium
+
+  * Default to session-less Configuration Manager REST auth (HTTP basic auth per
+    request) instead of a kept-alive session per worker process. The old model
+    accumulated sessions as workers x cluster-nodes and exhausted the per-array
+    CM session cap (~64), failing auth cluster-wide and stalling status()/
+    pvestatd. Session-less auth holds no persistent session, so nothing
+    accumulates; controller-endpoint failover still works. Opt back in with
+    `rest_keepalive 1`. Verified live on the E590H that the GUM accepts basic
+    auth across the full REST surface. Addresses GitHub issue #26.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Tue, 23 Jun 2026 12:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha16-1) stable; urgency=medium
 
   * Fix snapshot rollback (qm rollback) on the array. restore_snapshot sent

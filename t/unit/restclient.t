@@ -194,4 +194,59 @@ subtest 'url_construction' => sub {
     like($url, qr{https://10\.0\.1\.100:23451/ConfigurationManager/v1/objects/storages/836000123456/ldevs/42}, 'URL constructed correctly');
 };
 
+# ── Session-less auth (GitHub #26) ──
+# A fake UserAgent records each HTTP::Request and replies with a canned response,
+# so we can assert HOW a request authenticates without touching the network.
+{
+    package FakeUA;
+    sub new { bless { reqs => [] }, shift }
+    sub request {
+        my ($self, $req) = @_;
+        push @{ $self->{reqs} }, $req;
+        return HTTP::Response->new(200, 'OK', [ 'Content-Type' => 'application/json' ], '{"ok":1}');
+    }
+}
+use HTTP::Response;
+
+subtest 'sessionless_uses_basic_auth_and_creates_no_session' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '836000123456',
+        username => 'maint', password => 'pw', sessionless => 1,
+    );
+    my $ua = FakeUA->new;
+    $client->{ua} = $ua;
+
+    # login() must be a no-op in session-less mode (nothing created server-side)
+    is($client->login(), undef, 'login() is a no-op in session-less mode');
+    is(scalar(@{ $ua->{reqs} }), 0, 'login() issued no HTTP request (no POST /sessions)');
+
+    # an ordinary request authenticates with HTTP basic auth, not a session token
+    $client->get_ldev(42);
+    is(scalar(@{ $ua->{reqs} }), 1, 'one request issued');
+    my $auth = $ua->{reqs}[0]->header('Authorization') // '';
+    like($auth, qr/^Basic /, 'request uses HTTP basic auth');
+    unlike($auth, qr/Session/, 'no Session token header');
+    is($client->{token}, undef, 'no session token stored');
+    is($client->{session_id}, undef, 'no session id stored');
+
+    # logout()/keepalive() are also no-ops with no session
+    is($client->logout(), undef, 'logout() is a no-op');
+    is($client->keepalive(), undef, 'keepalive() is a no-op');
+};
+
+subtest 'session_mode_uses_session_token' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '836000123456',
+        username => 'maint', password => 'pw',    # sessionless omitted => session mode
+    );
+    ok(!$client->{sessionless}, 'session mode is off by default at the client layer');
+    my $ua = FakeUA->new;
+    $client->{ua} = $ua;
+    $client->{token} = 'TOK123';                  # simulate an established session
+
+    $client->get_ldev(42);
+    is($ua->{reqs}[0]->header('Authorization'), 'Session TOK123',
+        'session mode authenticates with the Session token');
+};
+
 done_testing();

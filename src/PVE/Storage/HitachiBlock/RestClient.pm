@@ -59,6 +59,13 @@ sub new {
         ua         => $ua,
         token      => undef,
         session_id => undef,
+        # Session-less mode: authenticate every request with HTTP basic auth and
+        # never create a persistent Configuration Manager session. CM caps
+        # concurrent sessions per array; a kept-alive session per worker process
+        # across a cluster exhausts that cap (GitHub #26). The array opens and
+        # immediately releases a transient session per basic-auth request, so
+        # nothing accumulates. login()/logout()/keepalive() become no-ops.
+        sessionless => $opts{sessionless} ? 1 : 0,
     }, $class;
 
     $self->{base_url} = $self->_build_base_url();
@@ -115,6 +122,11 @@ sub _sessions_url {
 
 sub login {
     my ($self) = @_;
+
+    # Session-less mode holds no session, so there is nothing to create — each
+    # request authenticates itself with basic auth (#26). A no-op here keeps the
+    # activate_storage / failover call sites unchanged.
+    return undef if $self->{sessionless};
 
     # Session creation is on the critical path for activate_storage/on_add_hook, so
     # it gets the same transient-error handling as _request: retry on rate limits
@@ -823,7 +835,11 @@ sub _request {
     $req->header('Content-Type' => 'application/json');
     $req->header('Accept'       => 'application/json');
 
-    if ($self->{token}) {
+    # Session-less mode authenticates each request with HTTP basic auth and never
+    # creates a persistent session (#26); otherwise use the session token.
+    if ($self->{sessionless}) {
+        $req->authorization_basic($self->{username}, $self->{password});
+    } elsif ($self->{token}) {
         $req->header('Authorization' => "Session $self->{token}");
     }
 
@@ -868,15 +884,23 @@ sub _request {
             && $failovers < scalar(@{$self->{endpoints}})
             && $self->_switch_endpoint()) {
             $failovers++;
-            $self->login();   # croaks only if NO controller is reachable
+            $self->login() unless $self->{sessionless};   # croaks only if NO controller is reachable
             $url = $self->_rewrite_host($url);
             $req->uri($url);
-            $req->header('Authorization' => "Session $self->{token}") if $self->{token};
+            # Re-apply auth for the survivor: basic auth is host-independent, the
+            # session token is per-controller and was just refreshed by login().
+            if ($self->{sessionless}) {
+                $req->authorization_basic($self->{username}, $self->{password});
+            } elsif ($self->{token}) {
+                $req->header('Authorization' => "Session $self->{token}");
+            }
             next;
         }
 
-        # 401 Unauthorized - re-authenticate once
-        if ($code == 401 && !$skip_reauth && $self->{username}) {
+        # 401 Unauthorized - re-authenticate once (session mode only; in session-less
+        # mode basic auth is already on every request, so a 401 is a real credential
+        # failure and must not loop).
+        if ($code == 401 && !$skip_reauth && $self->{username} && !$self->{sessionless}) {
             $self->login();
             $req->header('Authorization' => "Session $self->{token}");
             $retries++;
