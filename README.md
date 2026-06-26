@@ -27,6 +27,17 @@ thin provisioning, QoS, replication — to the array, in the spirit of VMware vV
 > Issue reports, and especially hardware-validation results, are very welcome — see
 > [Contributing](#contributing).
 
+> ### 🧭 Roadmap: a multi-vendor framework
+>
+> Once this plugin is **stable and hardware-validated**, its design is intended to be
+> refactored into a vendor-neutral Fibre Channel storage framework —
+> [**pve-FCLUPlugin**](https://github.com/ciroiriarte/pve-FCLUPlugin) — that
+> generalizes the array Driver / host Connector / shared Plugin-Registry-Capabilities
+> spine so the same per-virtual-disk LUN model can drive other arrays (e.g. Dell
+> PowerMax/PowerStore, Pure Storage, IBM FlashSystem, NetApp). This plugin serves as
+> the reference implementation; the migration is staged, so it remains the supported
+> path until the framework is ready.
+
 ## Features
 
 - **1 LUN per virtual disk** — direct array volumes, no LVM layer.

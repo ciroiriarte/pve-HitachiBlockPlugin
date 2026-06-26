@@ -217,3 +217,26 @@ clone is not possible** — PVE exposes no plugin hook for it; see
 3. Expand LDEV on array (async)
 4. Rescan SCSI paths + multipathd resize on host
 5. Update registry with new size
+
+## Future direction: a multi-vendor framework
+
+This plugin is single-vendor (Hitachi) by design today, but the architecture above —
+a thin PVE plugin entry point over an array **Driver** (REST), a host **Connector**
+(multipath/FC), and a shared **Registry/Capabilities** spine — was deliberately
+factored so it can generalize. Once the plugin is **stable and hardware-validated**,
+the intent is to refactor it into a vendor-neutral framework,
+[**pve-FCLUPlugin**](https://github.com/ciroiriarte/pve-FCLUPlugin) ("FC LUN"), which
+keeps the same per-virtual-disk LUN model (one LUN per disk, array-offloaded
+snapshots/CoW clones/resize/QoS) while supporting additional arrays — e.g. Dell
+PowerMax/PowerStore, Pure Storage, IBM FlashSystem, NetApp — through pluggable drivers
+behind one stable internal driver contract (vendor-neutral internally, one thin PVE
+plugin type per vendor).
+
+This Hitachi plugin is the **reference implementation** for that framework, and the
+findings captured in the ADRs feed directly into its driver contract — notably
+[ADR 0001 — Control-plane REST session scaling](adr/0001-control-plane-session-scaling.md)
+(how a driver should authenticate without exhausting array session limits) and
+[ADR 0002 — Full-clone offload](adr/0002-full-clone-offload.md) (why a driver contract
+needs an explicit clone/teardown pairing rather than re-deriving array state). The
+migration is **staged**: this plugin remains the supported path until the framework is
+ready, so nothing here is deprecated by the roadmap.
