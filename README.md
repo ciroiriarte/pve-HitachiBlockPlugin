@@ -63,6 +63,20 @@ thin provisioning, QoS, replication — to the array, in the spirit of VMware vV
 
 See [Operations](docs/operations.md) for how each is used.
 
+## Screenshots
+
+Add the storage from *Datacenter → Storage → Add → Hitachi Block* — the platform
+drop-down picks the REST dialect (VSP One Block / E series / G series):
+
+![Add: Hitachi Block storage dialog](docs/images/add-storage-platform.png)
+
+Each virtual disk is a dedicated array LDEV, browsable under the node's storage view:
+
+![VM Disks browser — one LUN per virtual disk](docs/images/vm-disks.png)
+
+More in [Installation § Creating the Storage](docs/installation.md#creating-the-storage)
+and [Operations](docs/operations.md).
+
 ## Supported platforms
 
 | Platform | `platform` | API endpoint | Default port |

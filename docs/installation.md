@@ -147,9 +147,25 @@ endpoint, storage device ID, DP pool, target FC ports, and credentials; set the
 content types and (under *Advanced*) the platform/QoS/host-mode options. Leave
 `Shared` enabled for clustered operation.
 
+![Add: Hitachi Block — General tab](images/add-storage-general.png)
+
+The **Platform** drop-down selects the REST dialect and default management port —
+*VSP One Block* / *VSP E series* (direct/embedded REST on 443) or *VSP G series*
+(Ops Center Configuration Manager on 23451):
+
+![Platform selection](images/add-storage-platform.png)
+
+Each GUI field maps to a `storage.cfg` option; see
+[configuration.md](configuration.md) for the full reference.
+
 > Earlier plugin versions did **not** appear in the *Add* drop-down and the grid
 > showed the raw `hitachiblock` type — that is fixed by the web UI module shipped
 > with this release.
+
+Once added, the storage appears in the list (here `e590h-test`, serving
+*Disk image* and *Container* content) and activates on the SAN-connected nodes:
+
+![Storage list with the Hitachi Block storage active](images/storage-list.png)
 
 ### From the CLI
 

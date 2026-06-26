@@ -36,6 +36,10 @@ pvesm list <storeid>
 
 Lists all volumes registered in the LDEV registry for the storage. Returns volume name, size, VMID, and parent volume (for linked clones).
 
+The same volumes are browsable in the web UI under *&lt;node&gt; → &lt;storage&gt; → VM Disks*. Each row is one array LDEV backing a virtual disk — base/template disks (`base-<vmid>-disk-N`), regular disks (`vm-<vmid>-disk-N`), cloud-init drives (`vm-<vmid>-cloudinit`), and EFI/TPM state volumes — all reported as `raw`:
+
+![VM Disks browser for a Hitachi Block storage](images/vm-disks.png)
+
 ### Storage Status
 
 ```bash
