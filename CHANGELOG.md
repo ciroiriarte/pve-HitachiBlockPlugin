@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.2.0~alpha18] - 2026-06-27
+
+> **Alpha pre-release** — fail-fast validation for an incompatible snapshot pool,
+> found during the live VSP E590H bring-up.
+
+### Fixed
+- **Validate that `snap_pool_id` is a Thin Image-capable pool, with an actionable
+  error.** Thin Image cannot store snapshot/CoW differential data in a multi-tier
+  **HDT** (Dynamic Tiering) pool, a data-direct-mapping pool, or a mainframe pool;
+  the array rejected such snapshots **mid-operation** with the cryptic *"The
+  specified pool is not created, is a multi-tier pool, is a pool with data direct
+  mapping enabled, or is for mainframe."* — surfaced from deep inside
+  `create_snapshot`. The plugin now checks the snap pool's attributes
+  (`poolType`/`tiers`/`dataDirectMappingEnabled`/`isMainframe`) up front and fails
+  fast at `volume_snapshot`, `clone_image`, and `volume_snapshot_consistency_group`
+  with a message that names the pool and states the single-tier-HDP requirement,
+  and warns (non-fatally) at `activate_storage` for early visibility. Note the
+  default `snap_pool_id` inherits `pool_id`, which is often an HDT data pool. An
+  HDT data pool remains fine for normal provisioning — only snapshots/clones need a
+  non-tiered snap pool. (GitHub issue #21)
+
 ## [1.2.0~alpha17] - 2026-06-23
 
 > **Alpha pre-release** — fixes Configuration Manager REST session exhaustion,

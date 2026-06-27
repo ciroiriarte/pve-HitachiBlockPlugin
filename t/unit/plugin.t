@@ -500,4 +500,46 @@ subtest 'volume_export_streams_whole_device' => sub {
     unlike($dd, qr/\bseek=/,   'no seek=');
 };
 
+# ── snap_pool Thin Image capability validation (#21) ──
+
+# Replicate the bad-pool decision in _assert_snap_pool_supports_ti so the
+# classification is covered without loading the full plugin (needs PVE libs).
+subtest 'snap_pool_ti_capability_logic' => sub {
+    my $is_bad = sub {
+        my ($pool) = @_;
+        my $type = $pool->{poolType} // '';
+        return 1 if $type eq 'HDT';
+        return 1 if ref $pool->{tiers} eq 'ARRAY' && @{ $pool->{tiers} } > 1;
+        return 1 if $pool->{dataDirectMappingEnabled};
+        return 1 if $pool->{isMainframe};
+        return 0;
+    };
+
+    ok($is_bad->({ poolType => 'HDT', tiers => [ {}, {} ] }), 'HDT multi-tier pool rejected');
+    ok($is_bad->({ poolType => 'HDP', tiers => [ {}, {} ] }), 'multi-tier pool rejected even if type not HDT');
+    ok($is_bad->({ poolType => 'HDP', dataDirectMappingEnabled => 1 }), 'data-direct-mapping pool rejected');
+    ok($is_bad->({ poolType => 'HDP', isMainframe => 1 }), 'mainframe pool rejected');
+    ok(!$is_bad->({ poolType => 'HDP' }), 'plain single-tier HDP pool accepted');
+    ok(!$is_bad->({ poolType => 'HDP', tiers => [ {} ] }), 'single-tier HDP (one tier) accepted');
+};
+
+# The validation must run at every Thin Image entry point so the array's cryptic
+# mid-operation error never leaks. Assert the call sites in the source.
+subtest 'snap_pool_validation_call_sites' => sub {
+    my $src = do {
+        local $/;
+        open my $fh, '<', 'src/PVE/Storage/Custom/HitachiBlockPlugin.pm'
+            or die "open plugin: $!";
+        <$fh>;
+    };
+    ok($src =~ /sub _assert_snap_pool_supports_ti/, 'helper is defined');
+    for my $sub (qw(volume_snapshot clone_image volume_snapshot_consistency_group)) {
+        my ($body) = $src =~ /\nsub \Q$sub\E\s*\{(.*?)\n\}/s;
+        ok(defined $body && $body =~ /_assert_snap_pool_supports_ti/,
+            "$sub calls _assert_snap_pool_supports_ti");
+    }
+    my ($h) = $src =~ /sub _assert_snap_pool_supports_ti\s*\{(.*?)\n\}/s;
+    like($h, qr/single-tier HDP/, 'error message states the HDP requirement');
+};
+
 done_testing();

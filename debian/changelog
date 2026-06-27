@@ -1,3 +1,14 @@
+pve-storage-hitachiblock (1.2.0~alpha18-1) stable; urgency=medium
+
+  * Validate snap_pool_id is Thin Image-capable (single-tier HDP), failing fast
+    with an actionable error instead of the array's cryptic mid-operation
+    "multi-tier pool" rejection. Checks poolType/tiers/dataDirectMappingEnabled/
+    isMainframe at volume_snapshot, clone_image, and the consistency-group path,
+    and warns at activate_storage. The default snap_pool_id inherits pool_id,
+    which is often an HDT data pool. Addresses GitHub issue #21.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 12:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha17-1) stable; urgency=medium
 
   * Default to session-less Configuration Manager REST auth (HTTP basic auth per

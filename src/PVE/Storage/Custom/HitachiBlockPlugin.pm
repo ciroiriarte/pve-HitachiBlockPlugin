@@ -383,6 +383,13 @@ sub activate_storage {
     eval { $class->_ensure_host_groups($storeid, $scfg, $client) };
     warn "Host group setup warning: $@" if $@;
 
+    # Early visibility: warn (don't fail) if the snap pool can't back Thin Image —
+    # an HDT/DDM/mainframe snap_pool still allows normal provisioning, only
+    # snapshots/clones fail. Surfacing it at activation puts it in the journal
+    # before a user hits the cryptic mid-operation array error (#21).
+    eval { $class->_assert_snap_pool_supports_ti($storeid, $scfg, $client) };
+    warn "snap_pool warning: $@" if $@;
+
     return 1;
 }
 
@@ -454,6 +461,42 @@ sub _alloc_size_mb {
     my $mb = ceil(($size_kib || 0) / 1024);
     $mb = $MIN_LDEV_MB if $mb < $MIN_LDEV_MB;
     return $mb;
+}
+
+# Thin Image stores snapshot/CoW differential data only in a plain single-tier DP
+# pool. The array rejects a snapshot whose pool is multi-tier (HDT / Dynamic
+# Tiering), has data-direct-mapping enabled, or is a mainframe pool — with the
+# cryptic "The specified pool is not created, is a multi-tier pool, is a pool with
+# data direct mapping enabled, or is for mainframe." raised mid-operation. Check the
+# snap pool's attributes up front so snapshot/clone fail fast with an actionable
+# message naming the pool and how to fix it, instead of surfacing the array error
+# from deep inside create_snapshot. (GitHub #21)
+sub _assert_snap_pool_supports_ti {
+    my ($class, $storeid, $scfg, $client) = @_;
+
+    my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
+
+    my $pool = eval { $client->get_pool($snap_pool_id) };
+    # If the pool can't be read here, don't block the operation on a transient
+    # read error — the array will still enforce its own rules. Only fail fast on a
+    # *definite* incompatibility we can see.
+    return unless $pool;
+
+    my $type = $pool->{poolType} // '';
+    my @bad;
+    push @bad, "a multi-tier (Dynamic Tiering, '$type') pool"
+        if $type eq 'HDT' || (defined $pool->{tiers} && ref $pool->{tiers} eq 'ARRAY' && @{$pool->{tiers}} > 1);
+    push @bad, "a data-direct-mapping pool"
+        if $pool->{dataDirectMappingEnabled};
+    push @bad, "a mainframe pool"
+        if $pool->{isMainframe};
+
+    return unless @bad;
+
+    die "snap_pool_id $snap_pool_id is " . join(' / ', @bad)
+        . "; Thin Image snapshots and linked clones require a single-tier HDP (or"
+        . " dedicated Thin Image) pool. Set 'snap_pool_id' to a non-tiered pool"
+        . " (note: it defaults to 'pool_id', which is often an HDT data pool).\n";
 }
 
 sub alloc_image {
@@ -826,6 +869,10 @@ sub volume_snapshot {
     my ($ldev_id) = $config->lookup_ldev($volname);
     die "Volume '$volname' not found\n" unless defined $ldev_id;
 
+    # Fail fast (with an actionable message) if the snap pool can't back Thin Image
+    # data, instead of letting create_snapshot surface the array's cryptic error (#21).
+    $class->_assert_snap_pool_supports_ti($storeid, $scfg, $client);
+
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
     # Encode the volume's LDEV id into the group name so the array-side fallback
     # search cannot resolve to another volume's pair with the same snapshot name.
@@ -1039,6 +1086,10 @@ sub clone_image {
     my $isBase = ($class->parse_volname($volname))[5];
     die "clone_image only supports a base image or a snapshot as the source\n"
         if !$isBase && !$snap;
+
+    # A linked clone is a Thin Image split pair, so the snap pool must be TI-capable;
+    # fail fast with an actionable message rather than mid-clone (#21).
+    $class->_assert_snap_pool_supports_ti($storeid, $scfg, $client);
 
     # Use the caller-supplied volname as the registry/dependency key throughout, so
     # the keys recorded here match exactly what the deletion guards (free_image,
@@ -1952,6 +2003,10 @@ sub volume_snapshot_consistency_group {
     my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
+
+    # All members get Thin Image pairs in the snap pool — fail fast if it can't
+    # back TI data, before creating any pair (#21).
+    $class->_assert_snap_pool_supports_ti($storeid, $scfg, $client);
 
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
     my $snap_group = "pve_cg_${storeid}_${snap}";
