@@ -13,10 +13,15 @@ MARKER='pve-storage-hitachiblock.js'
 
 inject() {
     [ -f "$TPL" ] || return 0
+    ver="$(dpkg-query -f '${Version}' -W pve-storage-hitachiblock 2>/dev/null || echo 0)"
     if grep -q "$MARKER" "$TPL"; then
+        # Tag already present — refresh its ?ver= cache-buster to the current
+        # package version so browsers reload the JS after an upgrade (the file
+        # on disk changed). Without this the query string stays frozen at the
+        # version first injected and clients keep serving stale cached JS.
+        sed -i "s#${MARKER}?ver=[^\"]*#${MARKER}?ver=${ver}#" "$TPL"
         return 0
     fi
-    ver="$(dpkg-query -f '${Version}' -W pve-storage-hitachiblock 2>/dev/null || echo 0)"
     line="<script type=\"text/javascript\" src=\"/pve2/js/${MARKER}?ver=${ver}\"></script>"
     # Append our tag on the line after the pvemanagerlib.js include.
     sed -i "\\#pvemanagerlib.js#a\\${line}" "$TPL"

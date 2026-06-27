@@ -43,8 +43,11 @@ install:
 	# For source installs (empty DESTDIR) wire the <script> tag into the live
 	# index template. The .deb does this via a dpkg trigger instead (see
 	# debian/postinst + debian/triggers), so it survives pve-manager upgrades.
-	@if [ -z "$(DESTDIR)" ]; then \
-	  if [ -f "$(INDEX_TPL)" ] && ! grep -q 'pve-storage-hitachiblock.js' "$(INDEX_TPL)"; then \
+	@if [ -z "$(DESTDIR)" ] && [ -f "$(INDEX_TPL)" ]; then \
+	  if grep -q 'pve-storage-hitachiblock.js' "$(INDEX_TPL)"; then \
+	    sed -i 's#pve-storage-hitachiblock.js?ver=[^"]*#pve-storage-hitachiblock.js?ver=$(VERSION)#' "$(INDEX_TPL)"; \
+	    echo "Refreshed Hitachi Block UI <script> cache-buster to $(VERSION) in $(INDEX_TPL) (reload the web UI with Ctrl-Shift-R)."; \
+	  else \
 	    sed -i '\#pvemanagerlib.js#a\<script type="text/javascript" src="/pve2/js/pve-storage-hitachiblock.js?ver=$(VERSION)"></script>' "$(INDEX_TPL)"; \
 	    echo "Injected Hitachi Block UI <script> into $(INDEX_TPL) (reload the web UI with Ctrl-Shift-R)."; \
 	  fi; \

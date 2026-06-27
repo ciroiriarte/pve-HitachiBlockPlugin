@@ -1,3 +1,18 @@
+pve-storage-hitachiblock (1.2.0~alpha22-1) stable; urgency=medium
+
+  * Fix the Web UI <script> cache-buster never refreshing on upgrade. The
+    postinst inject() returned early when the tag was already present, so the
+    ?ver= query string stayed frozen at the version first injected (e.g.
+    1.2.0~alpha13-1) while the JS on disk kept changing — browsers then served
+    stale cached JS and new GUI fields (e.g. the alpha21 skip_unmap_io_check /
+    rest_keepalive / lock_timeout controls) did not appear without a manual
+    hard refresh. inject() now rewrites the existing tag's ?ver= to the current
+    package version on every configure/triggered run. The Makefile source-install
+    path got the same fix (refresh in place instead of skipping). No-op for fresh
+    installs. (GitHub issue #9 follow-up)
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 21:15:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha21-1) stable; urgency=medium
 
   * Expose the three remaining backend properties in the manager6 Web UI
