@@ -608,6 +608,29 @@ sub free_image {
     };
     warn "Snapshot cleanup warning: $@" if $@;
 
+    # If this volume is a linked clone, its LDEV is the S-VOL of a Thin Image pair
+    # whose P-VOL is the source — so the list above (pairs where THIS ldev is the
+    # P-VOL) never sees it. Release that backing pair now, otherwise the array
+    # refuses to delete the LDEV ("assigned to a pair") and the clone is unfreeable
+    # (#23). Prefer the recorded pair id; fall back to discovering it by the
+    # clone's group name on the recorded P-VOL.
+    if (defined $meta->{parent_volname}) {
+        eval {
+            my $pair_id = $meta->{clone_snapshot_id};
+            if (!defined $pair_id && defined $meta->{clone_pvol_ldev}) {
+                my $snaps = $client->list_snapshots(pvol_ldev_id => $meta->{clone_pvol_ldev});
+                for my $s (@$snaps) {
+                    next unless ($s->{snapshotGroupName} || '') eq "pve_lc_${ldev_id}"
+                        || ($s->{svolLdevId} // -1) == $ldev_id;
+                    $pair_id = $s->{snapshotId};
+                    last;
+                }
+            }
+            $client->delete_snapshot($pair_id) if defined $pair_id;
+        };
+        warn "Linked-clone pair release warning: $@" if $@;
+    }
+
     # Tear down the HOST side FIRST: flush the multipath map, de-whitelist, and
     # delete the underlying SCSI paths. This must happen before the array unmap —
     # otherwise the array refuses the unmap with "the LU is executing host I/O"
@@ -1111,54 +1134,106 @@ sub clone_image {
     my $snap_pool_id = $scfg->{snap_pool_id} // $scfg->{pool_id};
     my $size_mb = $src_meta->{size_mb} || 1;
 
+    # The S-VOL must match the P-VOL's exact block count (Thin Image requirement);
+    # read it from the array rather than re-deriving from size_mb.
+    my $src_ldev = $client->get_ldev($clone_source_ldev);
+    my $block_capacity = $src_ldev->{blockCapacity};
+
     my $new_ldev_id;
+    my $pair_snapshot_id;
+    my $pair_created = 0;
     my $committed = 0;
 
+    # The linked-clone workflow on VSP One Block / Thin Image Advanced (confirmed
+    # live on the E590H, see GitHub #24): the array rejects an S-VOL supplied at
+    # pair-creation time and requires the S-VOL to be mapped (have LU paths) before
+    # it is attached. So, in order:
+    #   1. create the S-VOL as a Thin Image virtual volume (poolId -1) with an
+    #      explicit in-range LDEV id (so the teardown fence accepts it — #20),
+    #   2. create a DATA-ONLY split Thin Image pair on the source (no svolLdevId,
+    #      autoSplit=true) → snapshot data stored, pair in PSUS,
+    #   3. map the S-VOL locally so it has LU paths,
+    #   4. assign the S-VOL to the pair's snapshot data → the S-VOL becomes a
+    #      host-R/W copy-on-write view that keeps sharing unchanged blocks with the
+    #      source via the pool (a persistent linked clone).
+    # (`isClone` is never set — that would full-copy then auto-delete the pair,
+    # yielding a standalone full clone instead of a space-sharing linked clone.)
     eval {
-        # Thin S-VOL to back the linked clone.
+        # 1. S-VOL: Thin Image virtual volume, explicit id inside ldev_range.
+        my $svol_id = $class->_next_ldev_in_range($client, $scfg, $config);
         my $result = $client->create_ldev(
-            pool_id => $snap_pool_id,
-            size_mb => $size_mb,
+            pool_id        => -1,
+            block_capacity => $block_capacity,
+            ldev_id        => $svol_id,
         );
-        $new_ldev_id = $result->{resourceId}
-            or die "Failed to create S-VOL for linked clone\n";
+        $new_ldev_id = $result->{resourceId} // $svol_id;
+        die "Failed to create S-VOL for linked clone\n" unless defined $new_ldev_id;
 
-        # Split Thin Image pair (autoSplit=true): the pair is created and split so the
-        # S-VOL becomes host R/W-accessible (status PSUS) while STILL sharing unchanged
-        # blocks with the source via the pool — a persistent copy-on-write linked
-        # clone. Per the REST API guide, `isClone` (which we never set) is the opposite:
-        # it full-copies then auto-deletes the pair, yielding a standalone full clone.
-        # An *un-split* pair's S-VOL is only "reference available", not host R/W.
+        # 2. Data-only split pair on the source. Group name is keyed by the S-VOL id
+        # (unique per clone) so we can find this exact pair afterwards.
+        my $snap_group = "pve_lc_${new_ldev_id}";
         $client->create_snapshot(
             pvol_ldev_id   => $clone_source_ldev,
-            svol_ldev_id   => $new_ldev_id,
             snap_pool_id   => $snap_pool_id,
-            snapshot_group => "pve_lclone_${storeid}_${new_ldev_id}",
+            snapshot_group => $snap_group,
             auto_split     => 1,
         );
+        $pair_created = 1;
 
-        # Label (prerequisite for orphan detection)
+        # Resolve the pair's object id (pvolLdevId,muNumber) for assign + teardown.
+        my $snaps = $client->list_snapshots(pvol_ldev_id => $clone_source_ldev);
+        for my $s (@$snaps) {
+            next unless ($s->{snapshotGroupName} || '') eq $snap_group;
+            $pair_snapshot_id = $s->{snapshotId};
+            last;
+        }
+        die "Could not resolve the Thin Image pair for the linked clone\n"
+            unless defined $pair_snapshot_id;
+
+        # Label (prerequisite for orphan detection).
         my $label = PVE::Storage::HitachiBlock::Config->make_label($storeid, $new_name);
         $client->set_ldev_label($new_ldev_id, $label);
 
-        # Map + discover are prerequisites for a usable clone: failure is fatal.
+        # 3. Map the S-VOL locally so it has LU paths (required before assign).
         $class->_map_lun_to_local($storeid, $scfg, $client, $new_ldev_id);
+
+        # 4. Attach the S-VOL to the snapshot data → host-R/W CoW view (PSUS).
+        $client->assign_snapshot_volume($pair_snapshot_id, $new_ldev_id);
 
         my $synth = $multipath->ldev_to_wwid($scfg->{storage_id}, $new_ldev_id);
         my ($wwid) = $class->_resolve_wwid($client, $multipath, $new_ldev_id, $synth);
 
-        # Commit LAST. Record the source volume (and snapshot, when applicable) so the
-        # source cannot be deleted while this linked clone still shares its blocks.
+        # Commit LAST. Record the source (and snapshot, when applicable) so it can't
+        # be deleted while this clone shares its blocks, plus the backing pair's
+        # object id + P-VOL so free_image can release the pair before deleting the
+        # S-VOL (the clone is the pair's S-VOL, not its P-VOL — #23).
         $config->register_ldev($new_name, $new_ldev_id,
-            wwid           => $wwid,
-            size_mb        => $size_mb,
-            pool_id        => $snap_pool_id,
-            parent_volname => $volname,
-            parent_snap    => ($snap ? $snap : undef),
+            wwid              => $wwid,
+            size_mb           => $size_mb,
+            pool_id           => $snap_pool_id,
+            parent_volname    => $volname,
+            parent_snap       => ($snap ? $snap : undef),
+            clone_snapshot_id => $pair_snapshot_id,
+            clone_pvol_ldev   => $clone_source_ldev,
         );
         $committed = 1;
     };
     if (my $err = $@) {
+        # Roll back in reverse: release the pair (frees snapshot data + unassigns the
+        # S-VOL), then unmap and delete the S-VOL LDEV.
+        if ($pair_created) {
+            if (!defined $pair_snapshot_id) {
+                eval {
+                    my $snaps = $client->list_snapshots(pvol_ldev_id => $clone_source_ldev);
+                    for my $s (@$snaps) {
+                        next unless ($s->{snapshotGroupName} || '') eq "pve_lc_${new_ldev_id}";
+                        $pair_snapshot_id = $s->{snapshotId};
+                        last;
+                    }
+                };
+            }
+            eval { $client->delete_snapshot($pair_snapshot_id) } if defined $pair_snapshot_id;
+        }
         if (defined $new_ldev_id) {
             eval { $class->_unmap_lun_from_local($storeid, $scfg, $client, $new_ldev_id) };
             eval { $client->delete_ldev($new_ldev_id) };

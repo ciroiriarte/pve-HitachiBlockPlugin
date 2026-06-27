@@ -189,16 +189,30 @@ name reservation, so a failed allocation never leaves a "ghost" volume.
 ### Clone (Linked) — `clone_image`
 
 Linked clones are the only clone path that runs through the plugin. The source must
-be a base image or a snapshot.
+be a base image or a snapshot. The result is a persistent host-R/W copy-on-write
+S-VOL (`PSUS`, `isClone` unset) that keeps sharing unchanged blocks with the source.
+
+The order matters: VSP One Block / Thin Image Advanced **rejects an S-VOL supplied at
+pair-creation time** and requires the S-VOL to be **mapped (have LU paths) before it
+is assigned** to the snapshot data. So `clone_image` does:
 
 1. Look up the source LDEV (or the snapshot's S-VOL if cloning from a snapshot)
-2. Create a thin S-VOL LDEV
-3. Create a **split** Thin Image pair (`autoSplit=true`, `isClone` unset): the S-VOL
-   becomes host R/W (status `PSUS`) while still sharing unchanged blocks with the
-   source via the pool (copy-on-write)
-4. Set the label on the S-VOL LDEV
-5. Register the new volume with parent tracking (`parent_volname`, `parent_snap`)
-6. Map LUN, rescan, resolve WWID, wait for device
+2. Create the S-VOL as a **Thin Image virtual volume** (`poolId -1`) with an explicit
+   in-range LDEV id (so the teardown fence accepts it) sized to the source's exact
+   block count
+3. Create a **data-only** split Thin Image pair on the source (`autoSplit=true`, **no**
+   `svolLdevId`) → snapshot data stored, pair in `PSUS`
+4. Label and **map** the S-VOL locally (gives it LU paths)
+5. **Assign** the S-VOL to the snapshot data (`actions/assign-volume`) → the S-VOL
+   becomes the host-R/W CoW view
+6. Resolve WWID, wait for device, and register with parent tracking
+   (`parent_volname`, `parent_snap`) **plus the backing pair's object id + P-VOL** so
+   `free_image` can release the pair before deleting the S-VOL (the clone is the
+   pair's S-VOL, not its P-VOL)
+
+> Earlier microcode/array families may accept the simpler "create pair with
+> `svolLdevId`" form, but the data-only-pair + assign-volume sequence is what the
+> E590H (microcode 93-07-23) requires and was validated live.
 
 ### Clone (Full) — handled by Proxmox core, not the plugin
 

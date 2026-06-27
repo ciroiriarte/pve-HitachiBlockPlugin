@@ -207,13 +207,21 @@ sub keepalive {
 sub create_ldev {
     my ($self, %opts) = @_;
 
-    croak "pool_id is required"   unless defined $opts{pool_id};
-    croak "size_mb is required"   unless defined $opts{size_mb};
+    croak "pool_id is required" unless defined $opts{pool_id};
+    croak "size_mb or block_capacity is required"
+        unless defined $opts{size_mb} || defined $opts{block_capacity};
 
-    my $body = {
-        poolId       => int($opts{pool_id}),
-        byteFormatCapacity => $opts{size_mb} . "M",
-    };
+    # poolId -1 creates a "virtual volume for Thin Image" (the S-VOL type for a
+    # linked clone) rather than a DP volume from a real pool. block_capacity (exact
+    # 512-byte block count) is preferred when the LDEV must match another volume's
+    # size exactly — e.g. a Thin Image S-VOL must equal its P-VOL's block count;
+    # otherwise byteFormatCapacity ("<n>M") is used.
+    my $body = { poolId => int($opts{pool_id}) };
+    if (defined $opts{block_capacity}) {
+        $body->{blockCapacity} = int($opts{block_capacity});
+    } else {
+        $body->{byteFormatCapacity} = $opts{size_mb} . "M";
+    }
 
     if (defined $opts{ldev_id}) {
         # Explicit LDEV id (the plugin always allocates from ldev_range).
@@ -600,6 +608,27 @@ sub restore_snapshot {
     my $body = { parameters => {} };
 
     my $res = $self->_request('POST', $self->_url("/snapshots/$snapshot_id/actions/restore/invoke"), $body);
+    return $self->_wait_for_job($res);
+}
+
+# Assign an existing S-VOL LDEV to a data-only Thin Image pair's snapshot data,
+# making the snapshot host-readable through that S-VOL (status PSUS, copy-on-write
+# sharing with the P-VOL). This is the second half of the linked-clone workflow on
+# VSP One Block / Thin Image Advanced: a pair created WITHOUT an S-VOL, then the
+# S-VOL assigned here. The S-VOL **must already have LU paths** (be mapped to a
+# host group) before assign — otherwise the array rejects it with KART30000-E
+# ("The specified snapshot S-VOL does not have LU paths …"). The microcode also
+# rejects supplying svolLdevId at pair-creation time, which is why the assignment
+# is a separate step. Confirmed live on the E590H (93-07-23). See GitHub #24.
+sub assign_snapshot_volume {
+    my ($self, $snapshot_id, $svol_ldev_id) = @_;
+
+    croak "snapshot_id is required"  unless defined $snapshot_id;
+    croak "svol_ldev_id is required" unless defined $svol_ldev_id;
+
+    my $body = { parameters => { svolLdevId => int($svol_ldev_id) } };
+    my $res = $self->_request('POST',
+        $self->_url("/snapshots/$snapshot_id/actions/assign-volume/invoke"), $body);
     return $self->_wait_for_job($res);
 }
 

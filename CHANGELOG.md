@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.2.0~alpha19] - 2026-06-27
+
+> **Alpha pre-release** — makes linked clones work on VSP One Block / Thin Image
+> Advanced (VSP E590H), validated live end-to-end.
+
+### Fixed
+- **Linked-clone creation now works on the E590H.** The old `clone_image` created
+  the S-VOL and then a Thin Image pair with `svolLdevId` supplied at creation —
+  which this microcode rejects ("The specified snapshot S-VOL does not have LU
+  paths, or the specified snapshot pair does not exist."). The clone path is
+  rewritten to the workflow the array actually requires (confirmed live): create
+  the S-VOL as a **Thin Image virtual volume** (`poolId -1`), create a **data-only**
+  split pair on the source (no `svolLdevId`, `autoSplit=true` → `PSUS`), **map** the
+  S-VOL so it has LU paths, then **assign** it to the snapshot data
+  (`actions/assign-volume`). The result is a persistent, host-R/W copy-on-write
+  S-VOL that shares blocks with its source. New `RestClient::assign_snapshot_volume`;
+  `create_ldev` gains `poolId -1` and exact `blockCapacity` support. (GitHub #24)
+- **Linked-clone S-VOL is allocated inside `ldev_range`.** The S-VOL now gets an
+  explicit in-range LDEV id (via `_next_ldev_in_range`) instead of the array's
+  auto-assigned lowest-free id, so the teardown safety fence accepts it and clones
+  no longer escape the reserved LDEV window. (GitHub #20)
+- **Linked clones can now be freed.** A clone's LDEV is the **S-VOL** of its backing
+  Thin Image pair (the P-VOL is the source), so `free_image`'s P-VOL-keyed snapshot
+  cleanup never saw it and `delete_ldev` failed ("assigned to a pair"), wedging the
+  clone *and* its parent. `clone_image` now records the backing pair's object id and
+  P-VOL, and `free_image` releases that pair (with a group-name fallback for clones
+  made before this change) before deleting the S-VOL. (GitHub #23)
+
+  Validated live: `qm clone` of a template produced CoW S-VOLs (`PSUS`, `isClone`
+  false, in `ldev_range`); the clone booted off the array LUN and was host-writable;
+  teardown released the pairs and freed the S-VOLs with no orphan.
+
 ## [1.2.0~alpha18] - 2026-06-27
 
 > **Alpha pre-release** — fail-fast validation for an incompatible snapshot pool,

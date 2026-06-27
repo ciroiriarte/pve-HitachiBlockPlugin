@@ -1,3 +1,22 @@
+pve-storage-hitachiblock (1.2.0~alpha19-1) stable; urgency=medium
+
+  * Make linked clones work on VSP One Block / Thin Image Advanced (E590H).
+    Rewrite clone_image to the workflow the array requires (confirmed live):
+    S-VOL as Thin Image virtual volume (poolId -1), data-only autoSplit pair on
+    the source, map the S-VOL, then assign-volume to the snapshot data -> a
+    persistent host-R/W copy-on-write S-VOL. The old path supplied svolLdevId at
+    pair creation, which the microcode rejects. New assign_snapshot_volume;
+    create_ldev gains poolId -1 + blockCapacity. (GitHub #24)
+  * Allocate the linked-clone S-VOL inside ldev_range (explicit in-range id) so
+    the teardown fence accepts it. (GitHub #20)
+  * Release the backing Thin Image pair when freeing a linked clone (the clone is
+    the pair's S-VOL, not its P-VOL), so the S-VOL can be deleted instead of
+    wedging the clone and its parent. (GitHub #23)
+    Validated live end-to-end: clone create (CoW S-VOL, PSUS, in-range), boot
+    host-R/W, and free with pairs released and no orphan.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 18:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha18-1) stable; urgency=medium
 
   * Validate snap_pool_id is Thin Image-capable (single-tier HDP), failing fast

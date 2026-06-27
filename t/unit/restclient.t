@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Test::More;
+use JSON qw(decode_json);
 
 use lib 'src';
 use PVE::Storage::HitachiBlock::RestClient;
@@ -73,7 +74,7 @@ subtest 'ldev_operations_require_params' => sub {
     like($@, qr/pool_id is required/, 'create_ldev needs pool_id');
 
     eval { $client->create_ldev(pool_id => 0) };
-    like($@, qr/size_mb is required/, 'create_ldev needs size_mb');
+    like($@, qr/size_mb or block_capacity is required/, 'create_ldev needs a size');
 
     eval { $client->delete_ldev() };
     like($@, qr/ldev_id is required/, 'delete_ldev needs ldev_id');
@@ -247,6 +248,50 @@ subtest 'session_mode_uses_session_token' => sub {
     $client->get_ldev(42);
     is($ua->{reqs}[0]->header('Authorization'), 'Session TOK123',
         'session mode authenticates with the Session token');
+};
+
+# ── Linked-clone workflow primitives (GitHub #24/#20) ──
+
+subtest 'create_ldev_thin_image_vvol_and_block_capacity' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '836000123456',
+        username => 'maint', password => 'pw', sessionless => 1,
+    );
+    $client->{ua} = FakeUA->new;
+
+    # Thin Image S-VOL: poolId -1, exact block count, explicit in-range id.
+    $client->create_ldev(pool_id => -1, block_capacity => 98304, ldev_id => 262);
+    my $body = decode_json($client->{ua}{reqs}[-1]->content);
+    is($body->{poolId}, -1, 'poolId -1 = Thin Image virtual volume');
+    is($body->{blockCapacity}, 98304, 'exact blockCapacity sent');
+    is($body->{ldevId}, 262, 'explicit in-range ldevId (so the teardown fence accepts it)');
+    ok(!exists $body->{byteFormatCapacity}, 'no byteFormatCapacity when block_capacity given');
+    ok(!exists $body->{isParallelExecutionEnabled}, 'no auto-assign when ldevId is explicit');
+
+    # Regular DP volume path still uses byteFormatCapacity.
+    $client->create_ldev(pool_id => 1, size_mb => 60);
+    my $b2 = decode_json($client->{ua}{reqs}[-1]->content);
+    is($b2->{byteFormatCapacity}, '60M', 'byteFormatCapacity used without block_capacity');
+};
+
+subtest 'assign_snapshot_volume' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '836000123456',
+        username => 'maint', password => 'pw', sessionless => 1,
+    );
+    $client->{ua} = FakeUA->new;
+
+    eval { $client->assign_snapshot_volume() };
+    like($@, qr/snapshot_id is required/, 'needs snapshot_id');
+    eval { $client->assign_snapshot_volume('256,3') };
+    like($@, qr/svol_ldev_id is required/, 'needs svol_ldev_id');
+
+    $client->assign_snapshot_volume('256,3', 262);
+    my $req = $client->{ua}{reqs}[-1];
+    like($req->uri, qr{/snapshots/256,3/actions/assign-volume/invoke},
+        'assign-volume action on the literal-comma snapshotId');
+    is(decode_json($req->content)->{parameters}{svolLdevId}, 262,
+        'svolLdevId in parameters');
 };
 
 done_testing();
