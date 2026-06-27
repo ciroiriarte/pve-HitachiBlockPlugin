@@ -42,8 +42,9 @@ sub api {
     # (APIAGE 5, so it accepts 9..14); claiming the current APIVER silences the
     # "older storage API" advisory. We conform to 14 by: handling credentials via
     # sensitive properties (plugindata 'sensitive-properties' + %sensitive in the
-    # add/update hooks), declaring volume_qemu_snapshot_method, and relying on the
-    # base qemu_blockdev_options() default (correct for our /dev/mapper block path).
+    # add/update hooks), declaring volume_qemu_snapshot_method, and overriding
+    # qemu_blockdev_options() to attach our /dev/mapper block device directly as a
+    # host_device for the PVE 9 -blockdev interface (see that method below).
     # The authoritative contract is the in-tree PVE::Storage::Plugin perldoc, not
     # the wiki. Bump in lockstep after verifying overridden method signatures.
     return 14;
@@ -929,6 +930,29 @@ sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
     return $class->filesystem_path($scfg, $volname, $storeid, $snapname);
+}
+
+# PVE 9 -blockdev attachment (APIVER 14). Our volumes are always raw, fully
+# provisioned block devices exposed as /dev/mapper/<wwid> — the live LDEV, or
+# for a snapshot the snapshot S-VOL's own mapper device. Resolve the right
+# device with path() (which honours $snapname) and attach it directly as a
+# host_device.
+#
+# We override the base default on purpose: it path()s, then stat()s the result
+# to guess host_device-vs-file and carries qcow2/qed snapshot-chain handling
+# that does not apply to a raw block volume. Declaring host_device
+# unconditionally is always correct for us and decouples us from that heuristic
+# across PVE point releases.
+sub qemu_blockdev_options {
+    my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
+
+    my ($path) = $class->path($scfg, $volname, $storeid, $options->{'snapshot-name'});
+
+    die "qemu_blockdev_options: expected an absolute device path, got "
+        . (defined($path) ? "'$path'" : 'undef') . "\n"
+        if !defined($path) || $path !~ m|^/|;
+
+    return { driver => 'host_device', filename => $path };
 }
 
 # Override the inherited (path-based) implementation: report size straight from

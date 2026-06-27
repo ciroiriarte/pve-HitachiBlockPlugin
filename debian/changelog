@@ -1,3 +1,21 @@
+pve-storage-hitachiblock (1.2.0~alpha23-1) stable; urgency=medium
+
+  * Implement qemu_blockdev_options() for the PVE 9 -blockdev disk-attachment
+    interface (APIVER 14). Our volumes are always raw block devices exposed at
+    /dev/mapper/<wwid> (live LDEV) or the snapshot S-VOL's own mapper device, so
+    the method resolves the device via path() (honouring the snapshot name) and
+    attaches it directly as { driver => 'host_device', filename => <path> }.
+    Previously we inherited the base default, which path()s then stat()s the
+    result to guess host_device-vs-file and carries qcow2/qed snapshot-chain
+    handling irrelevant to raw block volumes; declaring host_device explicitly is
+    always correct for us and decouples us from that heuristic across PVE point
+    releases. A non-absolute/undef path is now rejected with a clear error.
+    Validated live on PVE 9.2.3 (host_device descriptors resolve to existing
+    block devices for live and base volumes); new t/unit/blockdev.t loads the
+    real plugin and covers the live, snapshot, and rejection paths. (GitHub #14)
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 22:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha22-1) stable; urgency=medium
 
   * Fix the Web UI <script> cache-buster never refreshing on upgrade. The
