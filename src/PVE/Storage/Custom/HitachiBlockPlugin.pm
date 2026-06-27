@@ -239,6 +239,21 @@ sub properties {
             default     => 0,
             optional    => 1,
         },
+        lock_timeout => {
+            description => "Seconds to wait to ACQUIRE the per-storage cluster lock for"
+                . " provisioning (alloc/free/clone). PVE's default acquisition timeout"
+                . " (~10s) is too short when several disks are provisioned concurrently"
+                . " and serialize on this lock, causing spurious 'got lock request"
+                . " timeout'. NOTE: this only extends the wait to ACQUIRE the lock; once"
+                . " acquired, pmxcfs hard-caps the locked work at 60s ('locked command"
+                . " timed out'), which this setting cannot change. For slow free/teardown"
+                . " blocked by the array host-I/O unmap interlock, enable"
+                . " skip_unmap_io_check (HMO 91) instead.",
+            type        => 'integer',
+            minimum     => 10,
+            default     => 120,
+            optional    => 1,
+        },
     };
 }
 
@@ -273,6 +288,7 @@ sub options {
         tls_verify        => { optional => 1 },
         tls_ca_file       => { optional => 1 },
         rest_keepalive    => { optional => 1 },
+        lock_timeout      => { optional => 1 },
     };
 }
 
@@ -364,6 +380,58 @@ my %_client_scfg;    # cache: storeid -> scfg, so _client can re-establish a
                      # activated, PVE skips re-activation and a later
                      # activate_volume would find no client. Remembering the scfg
                      # lets _client lazily re-login instead of dying. (GitHub #13)
+
+# Default per-storage cluster-lock ACQUISITION timeout (seconds). PVE core wraps the
+# mutating ops — vdisk_alloc/vdisk_free/clone/create_base/rename_volume — in
+# cluster_lock_storage with NO explicit timeout, so the pmxcfs default (~10s) applies
+# to ACQUIRING the lock. That is too short when several disks are provisioned
+# concurrently and serialize here, yielding spurious "got lock request timeout".
+#
+# IMPORTANT SCOPE (verified against PVE::Cluster $cfs_lock): this raises only the
+# time to ACQUIRE the lock. Once acquired, pmxcfs separately HARD-CAPS the locked
+# code at 60s (alarm(60) -> "'<lock>'-locked command timed out - aborting"), which no
+# plugin setting can change. So a single op that itself runs >60s under the lock
+# (e.g. a free whose unmap is blocked by the array host-I/O interlock and retries)
+# still aborts regardless of this value — the fix for that is skip_unmap_io_check
+# (HMO 91), not a bigger lock_timeout. Also note activate_storage/activate_volume are
+# NOT wrapped in cluster_lock_storage by PVE, so this does not affect them.
+our $DEFAULT_LOCK_TIMEOUT = 120;
+
+# Resolve the lock timeout: an explicit caller value wins; otherwise the storage's
+# configured `lock_timeout`; otherwise the default. Pulled out so it is unit-testable
+# without the PVE cluster stack.
+sub _resolve_lock_timeout {
+    my ($class, $caller_timeout, $configured) = @_;
+    return $caller_timeout if defined $caller_timeout;
+    return $configured     if defined $configured;
+    return $DEFAULT_LOCK_TIMEOUT;
+}
+
+# Override the per-storage lock to use a longer, configurable ACQUISITION timeout
+# (#10). Only substitutes when PVE core passes undef — which it does for the mutating
+# ops (alloc/free/clone/create_base/rename); an explicit caller timeout passes
+# through unchanged.
+sub cluster_lock_storage {
+    my ($class, $storeid, $shared, $timeout, $func, @param) = @_;
+
+    if (!defined $timeout) {
+        # Read the configured lock_timeout at runtime. PVE::Storage is fully loaded by
+        # the time any lock is taken, so calling it fully-qualified avoids the
+        # compile-time circular dependency a `use PVE::Storage` would create in a
+        # custom plugin. The eval only guards reading storage.cfg (which can fail
+        # before the cluster fs is online); fall back to the default and warn on an
+        # unexpected error rather than swallowing it silently.
+        my $configured;
+        eval {
+            my $cfg = PVE::Storage::config();
+            $configured = $cfg->{ids}{$storeid}{lock_timeout};
+        };
+        warn "lock_timeout lookup for '$storeid' failed, using default: $@" if $@;
+        $timeout = $class->_resolve_lock_timeout(undef, $configured);
+    }
+
+    return $class->SUPER::cluster_lock_storage($storeid, $shared, $timeout, $func, @param);
+}
 
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;

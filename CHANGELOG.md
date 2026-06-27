@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.2.0~alpha20] - 2026-06-27
+
+> **Alpha pre-release** — configurable cluster-lock acquisition timeout for
+> concurrent provisioning.
+
+### Added
+- **`lock_timeout` storage property (default 120s)** — overrides
+  `cluster_lock_storage` to extend how long PVE waits to **acquire** the per-storage
+  cluster lock for the mutating ops (`alloc`/`free`/`clone`/`create_base`/`rename`),
+  which PVE core takes with no explicit timeout (pmxcfs default ~10s). When several
+  disks are provisioned concurrently they serialize on this lock and, at real-array
+  per-op latencies, exceed 10s — producing spurious `got lock request timeout`
+  failures. An explicit caller timeout still passes through unchanged.
+
+  **Scope (verified against `PVE::Cluster`):** this extends only the *wait to
+  acquire* the lock. Once acquired, pmxcfs separately **hard-caps the locked work at
+  60s** (`'<lock>'-locked command timed out`), which no plugin setting can change —
+  so a single operation that itself runs >60s under the lock (e.g. a `free` whose
+  unmap is blocked by the array's host-I/O interlock and retries) still aborts
+  regardless of `lock_timeout`. The fix for *that* case is `skip_unmap_io_check`
+  (HMO 91), not a larger lock timeout. Does not affect `activate_storage`/
+  `activate_volume` (PVE does not lock-wrap them). (GitHub issue #10)
+
 ## [1.2.0~alpha19] - 2026-06-27
 
 > **Alpha pre-release** — makes linked clones work on VSP One Block / Thin Image

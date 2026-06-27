@@ -542,4 +542,37 @@ subtest 'snap_pool_validation_call_sites' => sub {
     like($h, qr/single-tier HDP/, 'error message states the HDP requirement');
 };
 
+# ── Cluster-lock timeout override (#10) ──
+
+# Replicate _resolve_lock_timeout precedence (caller > configured > default)
+# without loading the PVE cluster stack.
+subtest 'lock_timeout_resolution_logic' => sub {
+    my $DEFAULT = 120;
+    my $resolve = sub {
+        my ($caller, $configured) = @_;
+        return $caller     if defined $caller;
+        return $configured if defined $configured;
+        return $DEFAULT;
+    };
+    is($resolve->(30, 90),    30,  'explicit caller timeout wins');
+    is($resolve->(undef, 90), 90,  'configured lock_timeout used when caller is undef');
+    is($resolve->(undef, undef), 120, 'falls back to the default when neither is set');
+    is($resolve->(0, 90),     0,   'an explicit 0 (no wait) is honoured, not overridden');
+};
+
+subtest 'cluster_lock_storage_override' => sub {
+    my $src = do {
+        local $/;
+        open my $fh, '<', 'src/PVE/Storage/Custom/HitachiBlockPlugin.pm'
+            or die "open plugin: $!";
+        <$fh>;
+    };
+    ok($src =~ /sub cluster_lock_storage/, 'overrides cluster_lock_storage');
+    my ($body) = $src =~ /\nsub cluster_lock_storage\s*\{(.*?)\n\}/s;
+    like($body, qr/_resolve_lock_timeout/, 'uses the resolver to pick the timeout');
+    like($body, qr/SUPER::cluster_lock_storage/, 'delegates to the PVE base lock');
+    like($body, qr/lock_timeout/, 'reads the configured lock_timeout');
+    like($src, qr/\$DEFAULT_LOCK_TIMEOUT\s*=\s*120/, 'default lock timeout is 120s');
+};
+
 done_testing();

@@ -1,3 +1,16 @@
+pve-storage-hitachiblock (1.2.0~alpha20-1) stable; urgency=medium
+
+  * Add lock_timeout storage property (default 120s) overriding
+    cluster_lock_storage to extend the per-storage cluster-lock ACQUISITION
+    timeout for alloc/free/clone, which PVE core takes with no explicit timeout
+    (pmxcfs default ~10s). Fixes spurious "got lock request timeout" when several
+    disks are provisioned concurrently and serialize on the lock. Scope: extends
+    only the wait to ACQUIRE; pmxcfs hard-caps the in-lock work at 60s, which this
+    cannot change (for slow free/teardown enable skip_unmap_io_check / HMO 91).
+    Reviewed externally (Codex) + verified against PVE::Cluster. (GitHub issue #10)
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 19:45:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha19-1) stable; urgency=medium
 
   * Make linked clones work on VSP One Block / Thin Image Advanced (E590H).
