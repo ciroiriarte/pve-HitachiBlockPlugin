@@ -230,6 +230,37 @@ Ext.define('PVE.storage.HitachiBlockInputPanel', {
             },
             {
                 xtype: 'proxmoxcheckbox',
+                name: 'skip_unmap_io_check',
+                fieldLabel: gettext('Skip unmap I/O check'),
+                // HMO 91: add the Hitachi host-mode option that lets LUN-path
+                // teardown skip the array's "executing host I/O" interlock, so
+                // free runs immediately instead of retrying with backoff. Safe
+                // because the plugin always tears the host side down first.
+                boxLabel: gettext('Add HMO 91 (faster teardown)'),
+                uncheckedValue: 0,
+                deleteDefaultValue: !me.isCreate,
+            },
+            {
+                xtype: 'proxmoxcheckbox',
+                name: 'rest_keepalive',
+                fieldLabel: gettext('Keep REST session'),
+                // Off (session-less) is the default; only enable for arrays that
+                // require session auth, mindful of the per-array session cap.
+                boxLabel: gettext('Persistent CM session per process'),
+                uncheckedValue: 0,
+                deleteDefaultValue: !me.isCreate,
+            },
+            {
+                xtype: 'proxmoxintegerfield',
+                name: 'lock_timeout',
+                fieldLabel: gettext('Lock acquire timeout (s)'),
+                minValue: 10,
+                emptyText: '120',
+                allowBlank: true,
+                deleteEmpty: !me.isCreate,
+            },
+            {
+                xtype: 'proxmoxcheckbox',
                 name: 'tls_verify',
                 fieldLabel: gettext('Verify TLS certificate'),
                 uncheckedValue: 0,

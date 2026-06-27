@@ -1,3 +1,20 @@
+pve-storage-hitachiblock (1.2.0~alpha21-1) stable; urgency=medium
+
+  * Expose the three remaining backend properties in the manager6 Web UI
+    create/edit dialog so it stays a complete front-end for the schema:
+    skip_unmap_io_check (HMO 91 teardown optimization) and rest_keepalive as
+    Advanced checkboxes, and lock_timeout as an Advanced integer field. The first
+    is the recommended fix for the array's host-I/O unmap interlock blocking
+    teardown. (GitHub issue #9)
+  * Add a GUI/schema drift guard unit test (t/unit/gui_schema.t) that diffs the
+    keys accepted by options() against the name: fields referenced in the GUI and
+    fails when a backend property has no GUI control (allow-list: nodes/disable,
+    provided by PVE.panel.StorageBase). Prevents the GUI and schema drifting
+    apart as new options are added (the original gap that hid skip_unmap_io_check,
+    rest_keepalive, and lock_timeout). (GitHub issue #9)
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 20:30:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha20-1) stable; urgency=medium
 
   * Add lock_timeout storage property (default 120s) overriding
