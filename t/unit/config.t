@@ -431,4 +431,32 @@ subtest 'cluster_lock_uses_dedicated_domain' => sub {
     is($id, 71, 'cluster-locked read-modify-write persisted the entry');
 };
 
+# ── Per-volume metadata merge (protected/notes backing, #15) ──
+
+subtest 'update_meta merges and clears keys' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+    no warnings 'redefine';
+    local *PVE::Storage::HitachiBlock::Config::_registry_file = sub { "$tmpdir/meta.json" };
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => 'test');
+    $config->register_ldev('vm-1-disk-1', 10, size_mb => 100);
+
+    # Set attributes without touching ldev_id.
+    $config->update_meta('vm-1-disk-1', protected => 1, notes => 'hello');
+    my ($id, $meta) = $config->lookup_ldev('vm-1-disk-1');
+    is($id, 10, 'ldev_id untouched by update_meta');
+    is($meta->{protected}, 1, 'protected persisted');
+    is($meta->{notes}, 'hello', 'notes persisted');
+
+    # undef value removes a key; other keys survive.
+    $config->update_meta('vm-1-disk-1', protected => undef);
+    (undef, $meta) = $config->lookup_ldev('vm-1-disk-1');
+    ok(!exists $meta->{protected}, 'protected cleared when set to undef');
+    is($meta->{notes}, 'hello', 'notes survive clearing of another key');
+    is($meta->{size_mb}, 100, 'unrelated meta preserved');
+
+    eval { $config->update_meta('nope-disk-1', protected => 1) };
+    like($@, qr/not in registry/, 'update_meta on unknown volume croaks');
+};
+
 done_testing();

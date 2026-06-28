@@ -1,3 +1,18 @@
+pve-storage-hitachiblock (1.2.0~alpha26-1) stable; urgency=medium
+
+  * Support per-volume attributes: protected flag and notes passthrough. Implement
+    get_volume_attribute / update_volume_attribute (protected, notes) plus the
+    get_volume_notes / update_volume_notes entry points, persisting both in the
+    cluster-replicated LDEV registry (new Config->update_meta() merges metadata
+    without touching ldev_id). free_image now refuses to delete a volume marked
+    protected, failing fast before any array session is opened (free_image also
+    reordered so all local checks run before connecting). protected reads back as
+    1/0; notes round-trip and clear on empty. State persists across nodes via the
+    registry. New t/unit/attributes.t (real plugin methods + free_image guard) and
+    a Config update_meta test. (GitHub #15)
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 23:55:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha25-1) stable; urgency=medium
 
   * Validate/untaint array-sourced values before they reach host tools. Added

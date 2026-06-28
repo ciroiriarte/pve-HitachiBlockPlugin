@@ -272,6 +272,32 @@ sub register_ldev {
     return 1;
 }
 
+# Merge arbitrary metadata keys into an existing volume's registry entry without
+# touching its ldev_id — used for per-volume attributes like `protected`/`notes`
+# (#15). A key whose value is undef is removed. Croaks if the volume is unknown.
+# Runs under the registry lock so it is cluster-safe and replicates across nodes.
+sub update_meta {
+    my ($self, $volname, %meta) = @_;
+
+    croak "volname is required" unless $volname;
+
+    $self->_with_registry_lock(sub {
+        my ($reg) = @_;
+        my $entry = $reg->{$volname};
+        croak "Volume '$volname' not in registry" unless ref $entry eq 'HASH';
+        for my $k (keys %meta) {
+            if (defined $meta{$k}) {
+                $entry->{$k} = $meta{$k};
+            } else {
+                delete $entry->{$k};
+            }
+        }
+        return;
+    });
+
+    return 1;
+}
+
 # Return the volname currently mapped to $ldev_id, or undef. Used to reject
 # importing/managing an LDEV that is already tracked under another name.
 sub find_volname_by_ldev {

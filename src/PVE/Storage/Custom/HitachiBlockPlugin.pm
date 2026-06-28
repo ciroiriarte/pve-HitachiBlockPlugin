@@ -695,12 +695,18 @@ sub alloc_image {
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase, $format) = @_;
 
-    my $client = $class->_client($storeid, $scfg);
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
     my ($ldev_id, $meta) = $config->lookup_ldev($volname);
     die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+
+    # Refuse to delete a volume the user marked protected (#15). Checked before we
+    # open an array session so it fails fast; cleared via `pvesm set` / the GUI
+    # (update_volume_attribute 'protected' 0).
+    die "Cannot delete '$volname': it is marked protected; clear the protected"
+        . " flag before deleting\n"
+        if $meta->{protected};
 
     # Refuse deletion while linked clones (Thin Image children) still depend on
     # this volume as their P-VOL — deleting it would corrupt those clones.
@@ -709,6 +715,8 @@ sub free_image {
         die "Cannot delete '$volname': linked clone(s) depend on it: "
             . join(', ', sort @$deps) . "\n";
     }
+
+    my $client = $class->_client($storeid, $scfg);
 
     # Delete any snapshot pairs first
     eval {
@@ -1012,6 +1020,71 @@ sub volume_size_info {
 
     # raw block volumes are fully provisioned from PVE's perspective: used == size
     return wantarray ? ($size, 'raw', $size, $parent) : $size;
+}
+
+# ── Per-volume attributes (issue #15) ──
+#
+# `protected` and `notes` are persisted in the cluster-replicated LDEV registry
+# (not on the array), so they survive across nodes and are honoured by free_image
+# (a protected volume cannot be deleted). PVE drives these via
+# get_volume_attribute / update_volume_attribute and the notes entry points.
+
+sub get_volume_attribute {
+    my ($class, $scfg, $storeid, $volname, $attribute) = @_;
+
+    if ($attribute eq 'protected') {
+        my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+        my (undef, $meta) = $config->lookup_ldev($volname);
+        return $meta && $meta->{protected} ? 1 : 0;
+    }
+
+    if ($attribute eq 'notes') {
+        return $class->get_volume_notes($scfg, $storeid, $volname);
+    }
+
+    return;
+}
+
+sub update_volume_attribute {
+    my ($class, $scfg, $storeid, $volname, $attribute, $value) = @_;
+
+    if ($attribute eq 'protected') {
+        my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+        my ($ldev_id) = $config->lookup_ldev($volname);
+        die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+        # Store 1 when set; remove the key when cleared (falsy).
+        $config->update_meta($volname, protected => ($value ? 1 : undef));
+        return;
+    }
+
+    if ($attribute eq 'notes') {
+        return $class->update_volume_notes($scfg, $storeid, $volname, $value);
+    }
+
+    die "attribute '$attribute' is not supported for storage type '$scfg->{type}'\n";
+}
+
+sub get_volume_notes {
+    my ($class, $scfg, $storeid, $volname, $timeout) = @_;
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    my ($ldev_id, $meta) = $config->lookup_ldev($volname);
+    die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+
+    return $meta->{notes} // '';
+}
+
+sub update_volume_notes {
+    my ($class, $scfg, $storeid, $volname, $notes, $timeout) = @_;
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    my ($ldev_id) = $config->lookup_ldev($volname);
+    die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+
+    # Empty/undef clears the field rather than persisting an empty string.
+    $config->update_meta($volname,
+        notes => (defined($notes) && $notes ne '' ? $notes : undef));
+    return;
 }
 
 # ── Snapshots ──
