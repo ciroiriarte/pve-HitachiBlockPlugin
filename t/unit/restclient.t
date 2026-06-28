@@ -62,6 +62,53 @@ subtest 'constructor_default_port' => sub {
     is($client->{port}, 443, 'default port is 443');
 };
 
+# ── Retry backoff jitter (#11) ──
+# Minimal response stub exposing header('Retry-After').
+{
+    package FakeResp;
+    sub new { my ($c, $ra) = @_; return bless { ra => $ra }, $c }
+    sub header { my ($self, $h) = @_; return $h eq 'Retry-After' ? $self->{ra} : undef }
+}
+
+subtest 'retry_delay_jitter' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '123',
+        username => 'admin', password => 'secret',
+    );
+
+    my $RETRY_DELAY = 2;   # mirrors the module constant
+
+    # Jitter: many samples at the same attempt must NOT all be equal, and each must
+    # fall within [base, base + RETRY_DELAY) — base + a random fraction of the interval.
+    for my $attempt (1, 2, 3) {
+        my $base = $RETRY_DELAY * $attempt;
+        my %seen;
+        my $within = 1;
+        for (1 .. 200) {
+            my $d = $client->_retry_delay($attempt, undef);
+            $seen{$d} = 1;
+            $within = 0 if $d < $base || $d >= $base + $RETRY_DELAY;
+        }
+        ok($within, "attempt $attempt: every delay in [$base, " . ($base + $RETRY_DELAY) . ")");
+        ok(scalar(keys %seen) > 1, "attempt $attempt: delays are non-constant (jitter present)");
+    }
+
+    # Monotonic base across attempts: later attempts wait at least as long (minus
+    # jitter overlap) — the floor of attempt N+1 >= floor of attempt N.
+    # Retry-After (numeric) takes precedence and is honored exactly, no jitter.
+    is($client->_retry_delay(1, FakeResp->new('17')), 17,
+        'numeric Retry-After is honored exactly (takes precedence over jitter)');
+    is($client->_retry_delay(3, FakeResp->new('5')), 5,
+        'Retry-After wins even when smaller than the computed backoff');
+
+    # Non-numeric / absent Retry-After falls through to jittered backoff (bounded).
+    my $d = $client->_retry_delay(1, FakeResp->new('Wed, 21 Oct 2026 07:28:00 GMT'));
+    ok($d >= 2 && $d < 4, 'non-numeric Retry-After ignored -> jittered backoff used');
+
+    # Cap: a very high attempt is clamped to the max.
+    ok($client->_retry_delay(1000, undef) <= 30, 'delay is capped at RETRY_MAX_DELAY');
+};
+
 subtest 'ldev_operations_require_params' => sub {
     my $client = PVE::Storage::HitachiBlock::RestClient->new(
         mgmt_ip    => '10.0.1.100',

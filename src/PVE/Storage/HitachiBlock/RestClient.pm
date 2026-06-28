@@ -14,6 +14,28 @@ my $JOB_POLL_INTERVAL   = 2;
 my $JOB_POLL_TIMEOUT    = 300;
 my $MAX_RETRIES         = 3;
 my $RETRY_DELAY         = 2;
+my $RETRY_MAX_DELAY     = 30;   # hard cap on any single backoff (seconds)
+
+# Backoff before a retry. When the server provides a numeric Retry-After it takes
+# precedence and is honored as-is (the server's explicit instruction). Otherwise
+# use a linear base (RETRY_DELAY * attempt) plus random jitter — a random fraction
+# of RETRY_DELAY — so that many nodes hitting the same array-side fault (e.g. the
+# GUM returning 503 under load, with no Retry-After) do not retry in lockstep and
+# re-saturate the shared management endpoint (thundering herd, #11). Bounded by
+# RETRY_MAX_DELAY. Pure function of (attempt, response) so it is unit-testable.
+sub _retry_delay {
+    my ($self, $attempt, $res) = @_;
+
+    if ($res) {
+        my $retry_after = $res->header('Retry-After');
+        return $retry_after + 0
+            if defined $retry_after && $retry_after =~ /^\d+$/;
+    }
+
+    my $delay = ($RETRY_DELAY * $attempt) + (rand() * $RETRY_DELAY);
+    $delay = $RETRY_MAX_DELAY if $delay > $RETRY_MAX_DELAY;
+    return $delay;
+}
 
 sub new {
     my ($class, %opts) = @_;
@@ -165,11 +187,7 @@ sub login {
         my $code = $res->code;
         if (($code == 429 || $code >= 500) && $retries < $MAX_RETRIES) {
             $retries++;
-            my $delay = $RETRY_DELAY * $retries;
-            if (my $retry_after = $res->header('Retry-After')) {
-                $delay = $retry_after if $retry_after =~ /^\d+$/ && $retry_after > $delay;
-            }
-            sleep($delay);
+            sleep($self->_retry_delay($retries, $res));
             next;
         }
 
@@ -951,11 +969,7 @@ sub _request {
 
         if ($retriable && $retries < $MAX_RETRIES) {
             $retries++;
-            my $delay = $RETRY_DELAY * $retries;
-            if (my $retry_after = $res->header('Retry-After')) {
-                $delay = $retry_after if $retry_after =~ /^\d+$/ && $retry_after > $delay;
-            }
-            sleep($delay);
+            sleep($self->_retry_delay($retries, $res));
             next;
         }
 

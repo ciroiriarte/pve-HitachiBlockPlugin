@@ -1,3 +1,18 @@
+pve-storage-hitachiblock (1.2.0~alpha30-1) stable; urgency=medium
+
+  * Add randomized jitter to REST retry backoff to de-synchronize retries
+    (GitHub #11). The two retry sites (login, _request) used a deterministic linear
+    backoff (RETRY_DELAY * attempt), so many nodes hitting the same array-side fault
+    (e.g. the GUM returning 503 under load, with no Retry-After) retried in lockstep
+    and re-saturated the shared management endpoint. Factored both into a new
+    _retry_delay() helper: linear base + a random fraction of RETRY_DELAY, bounded
+    by RETRY_MAX_DELAY (30s). A numeric Retry-After still takes precedence and is
+    honored exactly (no jitter). The idempotency-aware retryable classifier is
+    unchanged. New unit test asserts the delay is non-constant per attempt, within
+    [base, base+RETRY_DELAY), honors/ignores Retry-After correctly, and is capped.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 28 Jun 2026 14:30:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha29-1) stable; urgency=medium
 
   * Fix silent wrong-data on snapshot rollback in branch/sibling scenarios on
