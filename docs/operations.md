@@ -111,6 +111,21 @@ the plugin. It creates a **CoW Thin Image S-VOL** that shares blocks with its so
   delete the source — or the source snapshot — while linked clones still depend on
   it** (clear error listing the dependents). Remove or full-copy the dependents first.
 
+> **One Thin Image pair per clone (current model).** Each linked clone creates its
+> own data-only Thin Image pair whose **P-VOL is the source LDEV** (the template/base
+> for a template clone, or the snapshot's S-VOL when cloning from a snapshot), in its
+> own snapshot group `pve_lc_<svolid>`. So N clones of one template consume **N pairs /
+> N snapshot groups / N MU slots on the template's LDEV** (Thin Image allows up to 1024
+> MUs per LDEV). `create_base` itself takes **no** array snapshot — it only relabels
+> the LDEV and renames the registry entry; the per-clone pairs are created at clone time.
+> A *shared-base* optimization (one read-only base snapshot per template, with every
+> clone cascaded from it) was evaluated under [GitHub #16] and **deferred**: it does
+> not reduce the total pair count (it relocates the N clone pairs from the template's
+> LDEV onto a single base-snapshot S-VOL, adding one base pair) and introduces an L2
+> cascade tree — a redesign of the validated clone create/teardown path whose only
+> material benefit (freeing the template's MU slots) matters solely at extreme per-
+> template clone counts. Revisit if a single template is cloned at that scale.
+
 ### Full Clone (handled by PVE core, not `clone_image`)
 
 A full/independent copy is **not** produced by `clone_image`. PVE core copies the data
