@@ -585,11 +585,14 @@ sub split_snapshot {
 
     croak "snapshot_id is required" unless defined $snapshot_id;
 
-    my $body = {
-        parameters => {
-            operationType => 'split',
-        },
-    };
+    # The single-pair split action takes an EMPTY parameters object. The REST API
+    # Reference lists "Body: None" for this action, and this microcode (E590H
+    # 93-07-23) rejects an `operationType` attribute with KART40038-E ("unsupported
+    # parameter ... operationType") — the same quirk as restore (see #22). Send
+    # {"parameters":{}}, the form the array accepts. (split was previously unused:
+    # pairs are created with autoSplit=true; the rollback re-split path, #12, is the
+    # first caller and exposed the stale operationType body.)
+    my $body = { parameters => {} };
 
     my $res = $self->_request('POST', $self->_url("/snapshots/$snapshot_id/actions/split/invoke"), $body);
     return $self->_wait_for_job($res);

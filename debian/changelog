@@ -1,3 +1,18 @@
+pve-storage-hitachiblock (1.2.0~alpha28-1) stable; urgency=medium
+
+  * Fix split_snapshot sending an unsupported operationType attribute. The
+    single-pair split action body carried {"parameters":{"operationType":"split"}},
+    which this microcode (E590H 93-07-23) rejects with KART40038-E — the same quirk
+    already fixed for restore in #22. The body is now an empty parameters object
+    ({"parameters":{}}, matching the REST API Reference's "Body: None"). split was
+    previously unused (pairs are created with autoSplit=true); the #12 rollback
+    re-split path is its first caller, so the stale body only surfaced now. Without
+    this, the post-rollback re-split failed and left the pair in PAIR, so a
+    subsequent rollback to the same snapshot was a silent no-op (caught by the live
+    snapshot combination test). Added a split body-shape unit test. (GitHub #12)
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 28 Jun 2026 02:50:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha27-1) stable; urgency=medium
 
   * Snapshot rollback: feasibility predicate, post-restore re-split, and registry

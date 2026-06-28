@@ -402,6 +402,22 @@ subtest 'restore_snapshot_sends_action' => sub {
     is(scalar keys %{ $log[0]{body}{parameters} }, 0, 'restore parameters is empty');
 };
 
+subtest 'split_snapshot_sends_action' => sub {
+    my $client = new_mock_client();
+    MockRestClient::set_mock_responses({});
+
+    $client->split_snapshot('snap-123');
+
+    my @log = MockRestClient::get_request_log();
+    like($log[0]{url}, qr{/snapshots/snap-123/actions/split/invoke}, 'split URL');
+    # Same microcode quirk as restore (#22): an `operationType` attribute is
+    # rejected with KART40038-E. The split body must be an empty parameters object.
+    # (Surfaced by the #12 rollback re-split path — split was previously unused.)
+    is(ref $log[0]{body}{parameters}, 'HASH', 'split body has a parameters object');
+    ok(!exists $log[0]{body}{parameters}{operationType}, 'split body has NO operationType (#12)');
+    is(scalar keys %{ $log[0]{body}{parameters} }, 0, 'split parameters is empty');
+};
+
 # ── QoS Operations ──
 
 subtest 'set_ldev_qos_sends_limits' => sub {
