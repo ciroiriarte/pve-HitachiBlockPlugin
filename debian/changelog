@@ -1,3 +1,22 @@
+pve-storage-hitachiblock (1.2.0~alpha29-1) stable; urgency=medium
+
+  * Fix silent wrong-data on snapshot rollback in branch/sibling scenarios on
+    large volumes (GitHub #12). Root cause: restore_snapshot()/split_snapshot()
+    return when the array JOB is accepted, but the underlying Thin Image copy
+    continues in the background (restore runs RCPY before settling to PAIR). On a
+    large volume the copy outlasts the job, so the post-restore re-split ran against
+    an RCPY pair and was a no-op — the snapshot was left non-PSUS, and a later
+    rollback to it silently did nothing (the LDEV kept the current/branch data).
+    A 48 MB efidisk dodged this (its copy finished within ~2s); a 60 GB boot disk
+    did not. Fix: volume_snapshot_rollback now waits for the pair to reach PAIR
+    after restore (before re-splitting) and PSUS after the split, via new
+    _wait_snapshot_status() polling. Found by a guest-level combination test
+    (full-clone VM, nested + same-level/branch snapshots) and isolated with
+    virt-cat (LDEV read) vs the booted-guest read. New unit test covers the
+    settle/timeout behavior. 174/174 unit tests pass.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 28 Jun 2026 10:05:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha28-1) stable; urgency=medium
 
   * Fix split_snapshot sending an unsupported operationType attribute. The

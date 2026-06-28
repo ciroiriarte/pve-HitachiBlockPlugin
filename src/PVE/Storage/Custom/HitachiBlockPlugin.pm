@@ -1223,6 +1223,29 @@ sub _resolve_snapshot_id {
     return undef;
 }
 
+# Poll a Thin Image pair's status until it reaches $want (returns the status), or
+# undef on timeout. restore_snapshot()/split_snapshot() return when the array JOB
+# is accepted, but the underlying copy continues in the background: a restore runs
+# RCPY before settling to PAIR, and a split runs (briefly) before settling to PSUS.
+# On a large volume the copy outlasts the job, so a caller that chains restore ->
+# split without waiting runs split against an RCPY pair, where it is a no-op — the
+# pair never returns to PSUS and a later restore of it silently does nothing (#12).
+sub _wait_snapshot_status {
+    my ($class, $client, $ldev_id, $snapshot_id, $want, $timeout) = @_;
+
+    $timeout //= 180;
+    my $interval = 2;
+    my $elapsed  = 0;
+    while ($elapsed < $timeout) {
+        my $snaps = eval { $client->list_snapshots(pvol_ldev_id => $ldev_id) } || [];
+        my ($pair) = grep { ($_->{snapshotId} // '') eq $snapshot_id } @$snaps;
+        return $pair->{status} if $pair && ($pair->{status} // '') eq $want;
+        sleep $interval;
+        $elapsed += $interval;
+    }
+    return undef;
+}
+
 # Drop registry snapshot entries whose array pair no longer exists (e.g. deleted
 # out-of-band, or state changed by a rollback). Defensive: only prunes entries
 # that recorded a snapshot_id which is absent from the array's current pair list,
@@ -1282,15 +1305,27 @@ sub volume_snapshot_rollback {
         $class->_resolve_snapshot_id($client, $config, $storeid, $ldev_id, $volname, $snap);
     die "Snapshot '$snap' not found for volume '$volname'\n" unless defined $snapshot_id;
 
-    # Restore = reverse-copy S-VOL -> P-VOL. restore_snapshot() blocks on the array
-    # job; on completion the pair lands in PAIR (snapshot data merged into the P-VOL).
-    # Other snapshots of this P-VOL are independent pairs and are left untouched.
+    # Restore = reverse-copy S-VOL -> P-VOL. The array runs RCPY and settles to PAIR
+    # (snapshot data merged into the P-VOL). restore_snapshot() returns when the JOB
+    # is accepted, BEFORE the RCPY copy finishes on a large volume, so WAIT for the
+    # pair to reach PAIR before re-splitting — otherwise the split below runs against
+    # an RCPY pair and is a no-op, leaving the snapshot non-PSUS and a future rollback
+    # to it a silent no-op (root-caused live on a 60G disk, #12). Other snapshots of
+    # this P-VOL are independent pairs and are left untouched.
     $client->restore_snapshot($snapshot_id);
+    $class->_wait_snapshot_status($client, $ldev_id, $snapshot_id, 'PAIR')
+        // warn "rollback: restore of '$snap' ($snapshot_id) did not settle to PAIR"
+            . " in time; re-split may not take effect\n";
 
     # Re-split so the snapshot stays a usable, re-restorable PSUS snapshot capturing
-    # the just-restored state. Without this the pair remains in PAIR and a later
-    # rollback to the same snapshot is a silent no-op (verified live, #12).
-    eval { $client->split_snapshot($snapshot_id); };
+    # the just-restored state, then wait for it to settle to PSUS. Without this the
+    # pair remains in PAIR and a later rollback to the same snapshot is a no-op (#12).
+    eval {
+        $client->split_snapshot($snapshot_id);
+        $class->_wait_snapshot_status($client, $ldev_id, $snapshot_id, 'PSUS')
+            // warn "rollback: re-split of '$snap' ($snapshot_id) did not settle to"
+                . " PSUS in time\n";
+    };
     warn "Re-split after rollback warning ($snapshot_id): $@" if $@;
 
     # Reconcile our registry with the array's actual pairs (defensive: catches

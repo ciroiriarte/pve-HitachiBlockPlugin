@@ -40,6 +40,18 @@ package FakeClient;
 sub new { my ($c, @s) = @_; return bless { snaps => [@s] }, $c }
 sub list_snapshots { my ($self, %o) = @_; return $self->{snaps} }
 
+# Stateful fake: returns one pair (id 267,4) whose status walks a sequence across
+# successive list_snapshots calls (then sticks on the last). For _wait_snapshot_status.
+package SeqClient;
+sub new { my ($c, @seq) = @_; return bless { seq => [@seq], i => 0 }, $c }
+sub list_snapshots {
+    my ($self, %o) = @_;
+    my $st = $self->{seq}[$self->{i}] // $self->{seq}[-1];
+    $self->{i}++;
+    return [ { snapshotId => '267,4', muNumber => 4, status => $st,
+               snapshotGroupName => 'pve_mystore_267_snap2' } ];
+}
+
 package main;
 
 use lib 'src';
@@ -136,6 +148,24 @@ subtest '_reconcile_snapshots prunes stale entries' => sub {
     my $snaps = $cfg->list_snapshots($vol);
     ok(exists $snaps->{snap1}, 'snap1 (still on array) retained');
     ok(!exists $snaps->{snap2}, 'snap2 (absent from array) pruned');
+};
+
+# ── _wait_snapshot_status: the #12 RCPY-settle fix ──
+subtest '_wait_snapshot_status waits for the pair to settle' => sub {
+    # Restore runs RCPY twice, then settles to PAIR — wait must return PAIR.
+    my $seq = SeqClient->new('RCPY', 'RCPY', 'PAIR');
+    is($CLASS->_wait_snapshot_status($seq, 267, '267,4', 'PAIR', 10), 'PAIR',
+        'returns PAIR once the restore copy completes (after RCPY)');
+
+    # Already at target on first poll -> returns immediately (no waiting).
+    my $now = SeqClient->new('PSUS');
+    is($CLASS->_wait_snapshot_status($now, 267, '267,4', 'PSUS', 10), 'PSUS',
+        'returns immediately when already at the target status');
+
+    # Never reaches target within the timeout -> undef (caller warns, non-fatal).
+    my $stuck = SeqClient->new('RCPY');
+    is($CLASS->_wait_snapshot_status($stuck, 267, '267,4', 'PSUS', 1), undef,
+        'times out to undef when the pair never reaches the target');
 };
 
 done_testing();

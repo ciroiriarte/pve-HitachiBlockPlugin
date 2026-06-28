@@ -1,2 +1,2 @@
-VERSION=1.2.0~alpha28
+VERSION=1.2.0~alpha29
 PACKAGE=pve-storage-hitachiblock
