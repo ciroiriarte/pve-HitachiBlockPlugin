@@ -20,12 +20,14 @@
 #   remote-list   List registered remote storage systems
 #   remote-add    Register a remote storage system
 #   orphans       Report LDEV/registry inconsistencies for a storage
+#   diagnostics   Read-only support bundle (config/REST health/drift/devices)
 
 use strict;
 use warnings;
 
 use Getopt::Long;
 use Pod::Usage;
+use Time::HiRes ();
 
 use lib '/usr/share/perl5';
 
@@ -86,10 +88,15 @@ my $client = PVE::Storage::HitachiBlock::RestClient->new(
     tls_ca_file => $scfg->{tls_ca_file},
 );
 
-$client->login();
+# `diagnostics` is a resilient, read-only support bundle: it must produce output
+# even when the management endpoint is unreachable, so it does its own guarded
+# (and timed) login probe rather than failing here.
+$client->login() unless $command eq 'diagnostics';
 
 eval {
-    if ($command eq 'list') {
+    if ($command eq 'diagnostics') {
+        cmd_diagnostics();
+    } elsif ($command eq 'list') {
         cmd_list();
     } elsif ($command eq 'create-tc') {
         cmd_create('TC');
@@ -251,7 +258,10 @@ sub cmd_remote_add {
     print "Registered remote storage: $opts{'remote-storage-id'}\n";
 }
 
-sub cmd_orphans {
+# Compute registry-vs-array drift. Returns a hashref:
+#   { array_orphans => [...], registry_orphans => [...], scan_min, scan_max }
+# Shared by `orphans` and `diagnostics` (read-only; no mutation here).
+sub scan_registry_vs_array {
     my $registry = $config->list_registered();
 
     my %registered;
@@ -302,6 +312,19 @@ sub cmd_orphans {
             unless $array_ids{$e->{ldev_id}};
     }
 
+    return {
+        array_orphans    => \@array_orphans,
+        registry_orphans => \@registry_orphans,
+        scan_min         => $scan_min,
+        scan_max         => $scan_max,
+    };
+}
+
+sub cmd_orphans {
+    my $scan = scan_registry_vs_array();
+    my @array_orphans    = @{$scan->{array_orphans}};
+    my @registry_orphans = @{$scan->{registry_orphans}};
+
     # Optionally prune registry entries whose backing LDEV no longer exists. This
     # is safe because the scan above pages the whole ldev_range (where the plugin
     # creates every LDEV), so a live in-range volume is never mistaken for an orphan.
@@ -335,7 +358,163 @@ sub cmd_orphans {
         if $opts{'auto-cleanup'};
 }
 
+# Read-only support bundle (#18): one coherent, secret-free snapshot for bug
+# reports. Performs NO mutations. Every array/host probe is guarded so the report
+# is produced even when the management endpoint is down (REST health then shows
+# the failure). REST response times are surfaced here — the GUM is intrinsically
+# slow, so per-call latency is a primary troubleshooting signal.
+sub cmd_diagnostics {
+    my %r;   # structured report (also used for --json)
+
+    $r{generated}     = scalar(localtime);
+    $r{storeid}       = $opts{storeid};
+    $r{plugin_version} = _plugin_version();
+    chomp(my $hostname = `hostname -s 2>/dev/null` || '');
+    $r{node} = $hostname;
+
+    # Effective config, credentials redacted. password never lives in storage.cfg;
+    # redact username (and any stray secret-ish keys) defensively.
+    my %redacted = %$scfg;
+    $redacted{username} = '<redacted>' if exists $redacted{username};
+    delete $redacted{password};
+    $r{config} = \%redacted;
+
+    # REST health: timed login probe + array identity/microcode + accumulated
+    # per-call timing. All guarded — a failure is reported, not fatal.
+    my %rest = (endpoint => $mgmt_ip, storage_id => $storage_id);
+    my $t0 = Time::HiRes::time();
+    my $ok = eval { $client->login(); 1 };
+    $rest{login_ms} = int((Time::HiRes::time() - $t0) * 1000);
+    if ($ok) {
+        $rest{reachable} = 1;
+        my $info = eval { $client->get_storage_info() };
+        if ($info) {
+            $rest{model}      = $info->{model};
+            $rest{serial}     = $info->{serialNumber} // $info->{serial};
+            $rest{microcode}  = $info->{dkcMicroVersion} // $info->{microVersion};
+        } else {
+            $rest{info_error} = _trim($@);
+        }
+    } else {
+        $rest{reachable} = 0;
+        $rest{error}     = _trim($@);
+    }
+    $r{rest} = \%rest;
+
+    # Registry-vs-array drift (guarded: needs REST).
+    my $scan = eval { scan_registry_vs_array() };
+    if ($scan) {
+        $r{drift} = {
+            array_orphans    => $scan->{array_orphans},
+            registry_orphans => $scan->{registry_orphans},
+            scan_range       => "$scan->{scan_min}-$scan->{scan_max}",
+        };
+    } else {
+        $r{drift_error} = _trim($@);
+    }
+
+    # Host-side device state for every registered volume on THIS node.
+    my $registry = eval { $config->list_registered() } || {};
+    my $mp = eval { require PVE::Storage::HitachiBlock::Multipath;
+                    PVE::Storage::HitachiBlock::Multipath->new() };
+    my @devs;
+    for my $volname (sort keys %$registry) {
+        my $e = $registry->{$volname};
+        next unless ref $e eq 'HASH' && defined $e->{ldev_id};
+        my $wwid = $e->{wwid}
+            || ($mp && eval { $mp->ldev_to_wwid($storage_id, $e->{ldev_id}) });
+        my $path = ($mp && $wwid) ? eval { $mp->get_device_path($wwid) } : undef;
+        push @devs, {
+            volname => $volname,
+            ldev_id => $e->{ldev_id},
+            wwid    => $wwid,
+            path    => $path,
+            present => ($path && -e $path) ? 1 : 0,
+            is_block => ($path && -b $path) ? 1 : 0,
+        };
+    }
+    $r{devices} = \@devs;
+
+    # Snapshot the accumulated REST timing AFTER all probes above.
+    if (my $ts = $client->rest_timing_stats()) {
+        $r{rest}{timing} = {
+            calls      => $ts->{count},
+            avg_ms     => int($ts->{avg} * 1000),
+            max_ms     => int($ts->{max} * 1000),
+            last_ms    => int($ts->{last} * 1000),
+            slowest    => $ts->{slowest},
+        };
+    }
+
+    if ($opts{json}) {
+        require JSON;
+        print JSON->new->canonical->encode(\%r) . "\n";
+        return;
+    }
+
+    # ── Human-readable report ──
+    print "=== Hitachi Block diagnostics ===\n";
+    printf "generated:   %s\n", $r{generated};
+    printf "node:        %s\n", $r{node};
+    printf "storeid:     %s\n", $r{storeid};
+    printf "plugin:      %s\n", $r{plugin_version};
+
+    print "\n-- effective config (secrets redacted) --\n";
+    printf "  %-18s %s\n", $_, $redacted{$_} for sort keys %redacted;
+
+    print "\n-- REST / management endpoint --\n";
+    printf "  endpoint:    %s\n", $rest{endpoint};
+    printf "  storage_id:  %s\n", $rest{storage_id};
+    printf "  reachable:   %s (login %d ms)\n", ($rest{reachable} ? 'yes' : 'NO'), $rest{login_ms};
+    printf "  error:       %s\n", $rest{error} if $rest{error};
+    printf "  model:       %s\n", $rest{model} // '-' if $rest{reachable};
+    printf "  serial:      %s\n", $rest{serial} // '-' if $rest{reachable};
+    printf "  microcode:   %s\n", $rest{microcode} // '-' if $rest{reachable};
+    printf "  info_error:  %s\n", $rest{info_error} if $rest{info_error};
+    if (my $tm = $r{rest}{timing}) {
+        printf "  timing:      %d calls, avg %d ms, max %d ms (slowest: %s)\n",
+            $tm->{calls}, $tm->{avg_ms}, $tm->{max_ms}, ($tm->{slowest} // '-');
+    }
+
+    print "\n-- registry vs array drift --\n";
+    if ($r{drift}) {
+        my $d = $r{drift};
+        printf "  scan range:  LDEV %s\n", $d->{scan_range};
+        printf "  array orphans (labeled LDEVs not in registry): %d\n", scalar @{$d->{array_orphans}};
+        printf "    LDEV %-8s %s\n", $_->{ldev_id}, $_->{label} for @{$d->{array_orphans}};
+        printf "  registry orphans (no backing LDEV): %d\n", scalar @{$d->{registry_orphans}};
+        printf "    %-20s LDEV %s\n", $_->{volname}, $_->{ldev_id} for @{$d->{registry_orphans}};
+    } else {
+        printf "  (unavailable: %s)\n", $r{drift_error} // 'unknown error';
+    }
+
+    print "\n-- host device state (this node) --\n";
+    printf "  %d registered volume(s)\n", scalar @devs;
+    for my $d (@devs) {
+        printf "  %-20s LDEV %-6s %-40s present=%s block=%s\n",
+            $d->{volname}, $d->{ldev_id}, ($d->{path} // '-'),
+            ($d->{present} ? 'yes' : 'no'), ($d->{is_block} ? 'yes' : 'no');
+    }
+    print "\n=== end diagnostics ===\n";
+}
+
 # ── Helpers ──
+
+# Best-effort plugin package version (dpkg), or 'unknown'.
+sub _plugin_version {
+    my $v = `dpkg-query -W -f='\${Version}' pve-storage-hitachiblock 2>/dev/null`;
+    chomp $v if defined $v;
+    return ($v && length $v) ? $v : 'unknown';
+}
+
+# Collapse an error/message to a single trimmed line for the report.
+sub _trim {
+    my ($s) = @_;
+    return 'unknown error' unless defined $s && length $s;
+    $s =~ s/\s+/ /g;
+    $s =~ s/^\s+|\s+$//g;
+    return length($s) > 200 ? substr($s, 0, 200) . '…' : $s;
+}
 
 sub resolve_volume_ldev {
     my ($volname) = @_;
@@ -402,6 +581,9 @@ hitachiblock-repl - Hitachi Block Storage Replication CLI
     remote-list       List remote storage systems
     remote-add        Register a remote storage system
     orphans           Report LDEV/registry inconsistencies
+    diagnostics       Read-only support bundle for bug reports (no mutations;
+                      config with secrets redacted, REST health + response
+                      times, registry/array drift, host device state)
 
   Options:
     --storeid         PVE storage ID (for credentials and config lookup)
@@ -461,5 +643,9 @@ hitachiblock-repl - Hitachi Block Storage Replication CLI
 
   # Resync after maintenance
   hitachiblock-repl resync --storeid myarray --pair-id TC_PAIR_001
+
+  # Capture a read-only support bundle for a bug report (no secrets, no mutations)
+  hitachiblock-repl diagnostics --storeid myarray
+  hitachiblock-repl diagnostics --storeid myarray --json > bundle.json
 
 =cut

@@ -1,5 +1,35 @@
 # Operations
 
+## Diagnostics & Bug Reports
+
+**The first step for any bug report is to capture a support bundle:**
+
+```
+hitachiblock-repl diagnostics --storeid <storeid>
+hitachiblock-repl diagnostics --storeid <storeid> --json > bundle.json   # machine-readable
+```
+
+`diagnostics` is **read-only** (performs no array or registry mutations) and is safe
+to paste into an issue — **credentials are never emitted** (the password is never in
+`storage.cfg`; the username is redacted). It collects, in one coherent snapshot:
+
+- **Versions** — the installed plugin package version and the array model / serial /
+  microcode (`dkcMicroVersion`).
+- **Effective configuration** for the storage, with secrets redacted.
+- **REST / management-endpoint health** — whether the Configuration Manager endpoint
+  is reachable, the **login probe time**, and **per-call response-time stats** (count,
+  average, max, and the slowest call). The GUM is intrinsically slow, so these latencies
+  are a primary troubleshooting signal — a rising max/average points at a management-
+  plane problem rather than a plugin bug.
+- **Registry-vs-array drift** — labeled LDEVs on the array missing from the local
+  registry (*array orphans*) and registry entries with no backing LDEV (*registry
+  orphans*), over the configured `ldev_range`.
+- **Host device state on this node** — for each registered volume, the resolved
+  `/dev/mapper/<wwid>` path and whether it is present and a block device.
+
+Run it on the node exhibiting the problem (device state is per-node). If the endpoint
+is down, the bundle is still produced and the REST section reports the failure.
+
 ## Core Storage Lifecycle
 
 ### Allocate a VM Disk

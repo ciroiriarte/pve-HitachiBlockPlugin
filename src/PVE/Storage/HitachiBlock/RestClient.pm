@@ -7,6 +7,7 @@ use LWP::UserAgent;
 use HTTP::Request;
 use JSON qw(encode_json decode_json);
 use Carp qw(croak);
+use Time::HiRes ();
 
 # Default timeouts and retry settings
 my $DEFAULT_TIMEOUT     = 30;
@@ -351,6 +352,15 @@ sub get_pool {
     croak "pool_id is required" unless defined $pool_id;
 
     return $self->_request('GET', $self->_url("/pools/$pool_id"));
+}
+
+# Fetch the array's own storage object (model, serial, microcode version). Used by
+# the diagnostics bundle as a lightweight reachability + version probe — a GET on
+# the base storages/<id> resource. Returns the decoded object (e.g. model,
+# serialNumber, dkcMicroVersion).
+sub get_storage_info {
+    my ($self) = @_;
+    return $self->_request('GET', $self->{base_url});
 }
 
 sub list_pools {
@@ -878,6 +888,36 @@ sub _url {
     return $self->{base_url} . $path;
 }
 
+# Accumulate per-request latency so callers (e.g. the diagnostics bundle, #18) can
+# report management-endpoint responsiveness — the GUM is intrinsically slow, so
+# per-call timing is a primary troubleshooting signal. Stats live on the client
+# object (per-process); negligible overhead and no logging here (threshold logging
+# belongs with the debug-level work, #33). Slowest sample keeps its method+path.
+sub _record_rest_timing {
+    my ($self, $method, $url, $secs) = @_;
+
+    my $s = $self->{rest_stats} ||= { count => 0, total => 0, max => 0 };
+    $s->{count}++;
+    $s->{total} += $secs;
+    $s->{last}   = $secs;
+    if ($secs > $s->{max}) {
+        $s->{max}        = $secs;
+        # Record the bare API path (drop the long base URL) for a readable report.
+        (my $path = $url) =~ s{^.*/v1/objects/}{/};
+        $s->{slowest} = "$method $path";
+    }
+    return;
+}
+
+# Snapshot of accumulated REST timing for this client (or undef if no calls yet):
+# { count, total, last, max, slowest, avg } — all times in seconds.
+sub rest_timing_stats {
+    my ($self) = @_;
+    my $s = $self->{rest_stats};
+    return undef unless $s && $s->{count};
+    return { %$s, avg => $s->{total} / $s->{count} };
+}
+
 sub _request {
     my ($self, $method, $url, $body, $skip_reauth) = @_;
 
@@ -902,7 +942,9 @@ sub _request {
     my $failovers = 0;
 
     while ($retries <= $MAX_RETRIES) {
+        my $t0 = Time::HiRes::time();
         $res = $self->{ua}->request($req);
+        $self->_record_rest_timing($method, $url, Time::HiRes::time() - $t0);
 
         if ($res->is_success) {
             my $content = $res->content;

@@ -1,3 +1,26 @@
+pve-storage-hitachiblock (1.2.0~alpha31-1) stable; urgency=medium
+
+  * Add a read-only `diagnostics` support-bundle subcommand to hitachiblock-repl
+    (GitHub #18). One command captures a coherent, secret-free snapshot for bug
+    reports (no mutations): plugin + array model/serial/microcode versions; the
+    effective storage config with credentials redacted (username masked, password
+    never emitted); REST/management-endpoint health (reachability, login probe
+    time, and per-call response-time stats); registry-vs-array drift (array/registry
+    orphans over the ldev_range); and host device state per registered volume
+    (resolved /dev/mapper path, present/block). Supports --json. The orphan scan is
+    shared with the existing `orphans` command. Documented in docs/operations.md as
+    the first step for bug reports.
+  * Instrument REST response times in RestClient: _request() now records per-call
+    latency (Time::HiRes) into rolling per-client stats (count/avg/max/last + the
+    slowest method+path), exposed via rest_timing_stats() and surfaced in the
+    diagnostics bundle. The GUM is intrinsically slow, so per-call latency is a key
+    troubleshooting signal; threshold logging is deferred to the debug-level work
+    (#33). New get_storage_info() (lightweight reachability + version probe).
+    Validated live on the E590H (login ~1.7s, slowest call ~4.1s = the /ldevs range
+    scan). New unit tests for the timing accumulator. 176/176 unit tests pass.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 28 Jun 2026 18:25:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha30-1) stable; urgency=medium
 
   * Add randomized jitter to REST retry backoff to de-synchronize retries

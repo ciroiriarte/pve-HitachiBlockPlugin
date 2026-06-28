@@ -109,6 +109,27 @@ subtest 'retry_delay_jitter' => sub {
     ok($client->_retry_delay(1000, undef) <= 30, 'delay is capped at RETRY_MAX_DELAY');
 };
 
+# ── REST response-time accumulation (#18 diag bundle) ──
+subtest 'rest_timing_stats' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '123',
+        username => 'admin', password => 'secret',
+    );
+
+    is($client->rest_timing_stats(), undef, 'no stats before any request');
+
+    $client->_record_rest_timing('GET', 'https://x/v1/objects/pools/0', 0.10);
+    $client->_record_rest_timing('POST', 'https://x/v1/objects/ldevs',  0.50);
+    $client->_record_rest_timing('GET', 'https://x/v1/objects/pools/1', 0.20);
+
+    my $s = $client->rest_timing_stats();
+    is($s->{count}, 3, 'counts every request');
+    cmp_ok(abs($s->{avg} - 0.2666667), '<', 0.0001, 'average across calls');
+    cmp_ok($s->{max}, '==', 0.50, 'tracks the slowest call');
+    is($s->{slowest}, 'POST /ldevs', 'slowest records method + bare API path');
+    is($s->{last}, 0.20, 'last records the most recent call');
+};
+
 subtest 'ldev_operations_require_params' => sub {
     my $client = PVE::Storage::HitachiBlock::RestClient->new(
         mgmt_ip    => '10.0.1.100',
