@@ -459,4 +459,33 @@ subtest 'update_meta merges and clears keys' => sub {
     like($@, qr/not in registry/, 'update_meta on unknown volume croaks');
 };
 
+# ── Snapshot rename (#34) ──
+
+subtest 'rename_snapshot preserves metadata' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+    no warnings 'redefine';
+    local *PVE::Storage::HitachiBlock::Config::_registry_file = sub { "$tmpdir/sr.json" };
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => 'test');
+    $config->register_ldev('vm-1-disk-1', 10, size_mb => 100);
+    $config->register_snapshot('vm-1-disk-1', 'old', svol_ldev_id => 11, snapshot_id => '10,3');
+
+    $config->rename_snapshot('vm-1-disk-1', 'old', 'new');
+    my $snaps = $config->list_snapshots('vm-1-disk-1');
+    ok(!exists $snaps->{old}, 'old name gone');
+    ok(exists $snaps->{new}, 'new name present');
+    is($snaps->{new}{svol_ldev_id}, 11, 'svol metadata preserved');
+    is($snaps->{new}{snapshot_id}, '10,3', 'snapshot_id preserved across rename');
+
+    # same-name is a no-op
+    ok($config->rename_snapshot('vm-1-disk-1', 'new', 'new'), 'same-name rename is a no-op');
+
+    # conflicts / missing
+    $config->register_snapshot('vm-1-disk-1', 'other', svol_ldev_id => 12);
+    eval { $config->rename_snapshot('vm-1-disk-1', 'new', 'other') };
+    like($@, qr/already exists/, 'rename onto an existing name is refused');
+    eval { $config->rename_snapshot('vm-1-disk-1', 'ghost', 'x') };
+    like($@, qr/not found/, 'rename of a missing snapshot is refused');
+};
+
 done_testing();

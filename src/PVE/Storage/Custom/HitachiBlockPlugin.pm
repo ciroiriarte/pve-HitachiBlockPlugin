@@ -99,8 +99,10 @@ sub type {
 sub plugindata {
     return {
         # images = VM disks; rootdir = LXC container rootfs (PVE formats and mounts
-        # the raw LUN, like the LVM-thin block model). Default content = images.
-        content => [ { images => 1, rootdir => 1 }, { images => 1 } ],
+        # the raw LUN, like the LVM-thin block model). `none` lets the storage be
+        # configured with no content type (parity with other plugins, #34). Default
+        # content = images.
+        content => [ { images => 1, rootdir => 1, none => 1 }, { images => 1 } ],
         format  => [ { raw => 1 }  , 'raw' ],
         # `password` is a sensitive property: PVE never writes it to storage.cfg
         # and passes it to the add/update hooks via %sensitive. (username is a
@@ -1200,6 +1202,73 @@ sub volume_snapshot_delete {
     die "Snapshot '$snap' not found for volume '$volname'\n";
 }
 
+# Resolve a snapshot's array pair id (snapshotId = "<pvolLdevId>,<muNumber>") from
+# the registry, falling back to a group-name search on the array (volume-specific
+# or legacy naming). Returns undef if not found.
+sub _resolve_snapshot_id {
+    my ($class, $client, $config, $storeid, $ldev_id, $volname, $snap) = @_;
+
+    my $snap_meta = $config->lookup_snapshot($volname, $snap);
+    return $snap_meta->{snapshot_id}
+        if $snap_meta && defined $snap_meta->{snapshot_id};
+
+    my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id) || [];
+    my %target_groups = (
+        "pve_${storeid}_${ldev_id}_${snap}" => 1,
+        "pve_${storeid}_${snap}"            => 1,
+    );
+    for my $s (@$snaps) {
+        return $s->{snapshotId} if $target_groups{ $s->{snapshotGroupName} || '' };
+    }
+    return undef;
+}
+
+# Drop registry snapshot entries whose array pair no longer exists (e.g. deleted
+# out-of-band, or state changed by a rollback). Defensive: only prunes entries
+# that recorded a snapshot_id which is absent from the array's current pair list,
+# so we never delete metadata for a snapshot we simply failed to query.
+sub _reconcile_snapshots {
+    my ($class, $client, $config, $ldev_id, $volname) = @_;
+
+    my $array = $client->list_snapshots(pvol_ldev_id => $ldev_id) || [];
+    my %live_ids = map { (defined $_->{snapshotId} ? $_->{snapshotId} : '') => 1 } @$array;
+
+    my $reg = $config->list_snapshots($volname);
+    for my $snapname (keys %$reg) {
+        my $sid = $reg->{$snapname}{snapshot_id};
+        next unless defined $sid;          # never prune un-identified entries
+        next if $live_ids{$sid};
+        $config->unregister_snapshot($volname, $snapname);
+    }
+    return 1;
+}
+
+# Sibling-preserving rollback predicate. Thin Image keeps every snapshot as an
+# independent pair, so restoring the P-VOL from one snapshot does NOT delete newer
+# snapshots (verified live on the VSP One Block / E series — see #12). We therefore
+# allow rollback to ANY existing snapshot and do not register newer snapshots as
+# blockers (unlike ZFS/LVM-thin, which destroy newer snapshots and so restrict to
+# the latest). A snapshot with dependent linked clones is blocked, mirroring the
+# deletion guards, since restoring it disturbs the shared base.
+sub volume_rollback_is_possible {
+    my ($class, $scfg, $storeid, $volname, $snap, $blockers) = @_;
+
+    $blockers //= [];
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+
+    die "can't rollback, snapshot '$snap' does not exist on '$volname'\n"
+        unless $config->lookup_snapshot($volname, $snap);
+
+    my $clone_deps = $config->find_snapshot_dependents($volname, $snap);
+    if (@$clone_deps) {
+        push @$blockers, @$clone_deps;
+        die "can't rollback to '$snap': linked clone(s) depend on this snapshot: "
+            . join(', ', sort @$clone_deps) . "\n";
+    }
+
+    return 1;
+}
+
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
@@ -1209,31 +1278,40 @@ sub volume_snapshot_rollback {
     my ($ldev_id) = $config->lookup_ldev($volname);
     die "Volume '$volname' not found\n" unless defined $ldev_id;
 
-    # Try registry first
-    my $snap_meta = $config->lookup_snapshot($volname, $snap);
-    if ($snap_meta && defined $snap_meta->{snapshot_id}) {
-        eval {
-            $client->restore_snapshot($snap_meta->{snapshot_id});
-            return 1;
-        };
-        warn "Direct snapshot restore failed, falling back to search: $@" if $@;
-    }
+    my $snapshot_id =
+        $class->_resolve_snapshot_id($client, $config, $storeid, $ldev_id, $volname, $snap);
+    die "Snapshot '$snap' not found for volume '$volname'\n" unless defined $snapshot_id;
 
-    # Fallback: search by group name (volume-specific or legacy).
-    my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id);
-    my %target_groups = (
-        "pve_${storeid}_${ldev_id}_${snap}" => 1,
-        "pve_${storeid}_${snap}"            => 1,
-    );
+    # Restore = reverse-copy S-VOL -> P-VOL. restore_snapshot() blocks on the array
+    # job; on completion the pair lands in PAIR (snapshot data merged into the P-VOL).
+    # Other snapshots of this P-VOL are independent pairs and are left untouched.
+    $client->restore_snapshot($snapshot_id);
 
-    for my $s (@$snaps) {
-        if ($target_groups{ $s->{snapshotGroupName} || '' }) {
-            $client->restore_snapshot($s->{snapshotId});
-            return 1;
-        }
-    }
+    # Re-split so the snapshot stays a usable, re-restorable PSUS snapshot capturing
+    # the just-restored state. Without this the pair remains in PAIR and a later
+    # rollback to the same snapshot is a silent no-op (verified live, #12).
+    eval { $client->split_snapshot($snapshot_id); };
+    warn "Re-split after rollback warning ($snapshot_id): $@" if $@;
 
-    die "Snapshot '$snap' not found for volume '$volname'\n";
+    # Reconcile our registry with the array's actual pairs (defensive: catches
+    # out-of-band deletions so listings/snapshot tree stay consistent).
+    eval { $class->_reconcile_snapshots($client, $config, $ldev_id, $volname); };
+    warn "Snapshot reconcile warning: $@" if $@;
+
+    return 1;
+}
+
+# Rename a snapshot (#34). Snapshots are tracked in the registry by name; the
+# array snapshot-group label still encodes the OLD name, but every operation
+# resolves the pair via the recorded snapshot_id (the group name is only a
+# fallback), so a registry-only rename is correct. A future enhancement could
+# also rename the array group label.
+sub rename_snapshot {
+    my ($class, $scfg, $storeid, $volname, $source_snap, $target_snap) = @_;
+
+    my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
+    $config->rename_snapshot($volname, $source_snap, $target_snap);
+    return;
 }
 
 sub volume_snapshot_info {
@@ -1252,12 +1330,16 @@ sub volume_snapshot_info {
     # Build snapshot chain (linear — each snap's parent is the previous one)
     my @ordered = sort { ($snaps->{$a}{timestamp} || 0) <=> ($snaps->{$b}{timestamp} || 0) } keys %$snaps;
 
-    my $prev = 'current';
+    my $prev  = 'current';
+    my $order = 0;
     for my $snapname (@ordered) {
         $info->{$snapname} = {
             description => '',
             parent      => undef,
             timestamp   => $snaps->{$snapname}{timestamp},
+            # Monotonic creation order (oldest = 0), matching the base/reference
+            # plugins so core code that sorts snapshots by `order` works.
+            order       => $order++,
         };
 
         # Chain: current -> snap1 -> snap2 -> ...
@@ -1266,8 +1348,9 @@ sub volume_snapshot_info {
         $prev = $snapname;
     }
 
-    # Current's parent is the most recent snapshot
+    # Current's parent is the most recent snapshot; it sorts after every snapshot.
     $info->{'current'}{parent} = $prev eq 'current' ? undef : $prev;
+    $info->{'current'}{order}  = $order;
 
     return $info;
 }

@@ -448,6 +448,31 @@ sub register_snapshot {
     return 1;
 }
 
+# Rename a snapshot's registry key, preserving its metadata (#34). Croaks if the
+# source is missing or the target already exists. Runs under the registry lock so
+# it is cluster-safe.
+sub rename_snapshot {
+    my ($self, $volname, $source, $target) = @_;
+
+    croak "volname is required"        unless $volname;
+    croak "source snapname is required" unless $source;
+    croak "target snapname is required" unless $target;
+    return 1 if $source eq $target;
+
+    $self->_with_registry_lock(sub {
+        my ($reg) = @_;
+        my $snaps = $reg->{$volname} && $reg->{$volname}{snapshots};
+        croak "snapshot '$source' not found for '$volname'"
+            unless $snaps && $snaps->{$source};
+        croak "target snapshot '$target' already exists for '$volname'"
+            if $snaps->{$target};
+        $snaps->{$target} = delete $snaps->{$source};
+        return;
+    });
+
+    return 1;
+}
+
 sub unregister_snapshot {
     my ($self, $volname, $snapname) = @_;
 

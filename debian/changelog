@@ -1,3 +1,28 @@
+pve-storage-hitachiblock (1.2.0~alpha27-1) stable; urgency=medium
+
+  * Snapshot rollback: feasibility predicate, post-restore re-split, and registry
+    reconcile (GitHub #12), plus Nimble-parity items (GitHub #34).
+    - Implement volume_rollback_is_possible as a SIBLING-PRESERVING predicate:
+      Thin Image keeps every snapshot as an independent pair, so restoring the
+      P-VOL from one snapshot does NOT delete newer snapshots (confirmed live on
+      the VSP E590H). Rollback to ANY existing snapshot is allowed; newer
+      snapshots are NOT blockers (unlike ZFS/LVM-thin). A snapshot with dependent
+      linked clones is blocked, mirroring the deletion guards.
+    - volume_snapshot_rollback now RE-SPLITS the pair after the restore job
+      completes. A restore lands the pair in PAIR (snapshot data merged into the
+      P-VOL); without a re-split the snapshot is left non-re-restorable (verified
+      live). It then reconciles the registry against the array's pairs.
+    - volume_snapshot_info now reports a monotonic `order` per snapshot, matching
+      the base/reference plugins.
+    - rename_snapshot implemented (registry-key rename via new
+      Config->rename_snapshot; the array group label is cosmetic and resolved via
+      the recorded snapshot_id). (#34)
+    - Add `none` to the advertised content types. (#34)
+    New t/unit/snapshots.t (predicate, order, rename, resolve/reconcile via a fake
+    client) and a Config rename_snapshot test. 172/172 unit tests pass.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 28 Jun 2026 01:30:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha26-1) stable; urgency=medium
 
   * Support per-volume attributes: protected flag and notes passthrough. Implement
