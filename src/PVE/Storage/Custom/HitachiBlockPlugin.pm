@@ -37,17 +37,59 @@ my $UNMAP_IO_RETRIES = 15;
 
 # ── Plugin Identity ──
 
+# Storage API version range we have validated our overridden method signatures
+# against. We conform to APIVER 14 by: handling credentials via sensitive
+# properties (plugindata 'sensitive-properties' + %sensitive in the add/update
+# hooks), declaring volume_qemu_snapshot_method, and overriding
+# qemu_blockdev_options() for the PVE 9 -blockdev interface (see that method).
+# The authoritative contract is the in-tree PVE::Storage::Plugin perldoc.
+#
+# Compatibility map (host APIVER -> PVE era -> impact on methods we override):
+#   <= 8    Below the APIAGE floor on PVE 9 (APIVER 14, APIAGE 5 => floor 9).
+#           Reported best-effort but predates our validation baseline.
+#   9..13   PVE 7.x–8.x / 9.0. Our overrides (path, filesystem_path,
+#           activate/deactivate_volume, volume_snapshot*, volume_size_info,
+#           clone_image/alloc/free) use stable signatures; the -blockdev and
+#           sensitive-property features are simply not requested by these hosts.
+#   14      PVE 9.x (validated live on 9.2.3). Adds sensitive-properties,
+#           volume_qemu_snapshot_method, and qemu_blockdev_options() — all
+#           implemented here. This is our tested ceiling (HB_MAX_APIVER).
+#
+# Raising HB_MAX_APIVER past 14 is a deliberate step: re-verify every overridden
+# method signature against the new APIVER, then bump it and extend this map.
+use constant {
+    HB_MIN_APIVER => 9,
+    HB_MAX_APIVER => 14,
+};
+
 sub api {
-    # Storage plugin API version this module targets. PVE 9.x is at APIVER 14
-    # (APIAGE 5, so it accepts 9..14); claiming the current APIVER silences the
-    # "older storage API" advisory. We conform to 14 by: handling credentials via
-    # sensitive properties (plugindata 'sensitive-properties' + %sensitive in the
-    # add/update hooks), declaring volume_qemu_snapshot_method, and overriding
-    # qemu_blockdev_options() to attach our /dev/mapper block device directly as a
-    # host_device for the PVE 9 -blockdev interface (see that method below).
-    # The authoritative contract is the in-tree PVE::Storage::Plugin perldoc, not
-    # the wiki. Bump in lockstep after verifying overridden method signatures.
-    return 14;
+    # PVE's plugin loader refuses to load a plugin whose api() is GREATER than the
+    # host's APIVER, and warns ("older storage API, upgrade recommended") whenever
+    # api() != the host APIVER. A hard-coded number therefore either fails to load
+    # (on an older host) or warns (whenever the host moves). Instead, report the
+    # host's own APIVER capped at the newest version we have validated, so we load
+    # warning-free across every PVE whose APIVER is within our tested range and
+    # degrade to a recommended-upgrade warning (never a load failure) on a newer
+    # PVE.
+    my $host = eval { PVE::Storage::APIVER() };
+
+    # Can't read the host version (very unusual) — claim our validated ceiling.
+    return HB_MAX_APIVER if !defined $host;
+
+    # Never claim newer than we've validated; this also guarantees we never report
+    # higher than the host's APIVER, so PVE never refuses to load us.
+    return HB_MAX_APIVER if $host > HB_MAX_APIVER;
+
+    # Host predates our validation floor: still mirror its APIVER so PVE loads us
+    # (reporting HB_MIN_APIVER here would exceed the host's APIVER and be refused),
+    # but surface that this PVE is older than we have tested.
+    warn "HitachiBlockPlugin: host storage APIVER $host is below the validated"
+        . " floor " . HB_MIN_APIVER . "; loading best-effort\n"
+        if $host < HB_MIN_APIVER;
+
+    # Host within (or below) our tested range: mirror it exactly — no mismatch
+    # warning, no refusal.
+    return $host;
 }
 
 sub type {

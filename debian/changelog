@@ -1,3 +1,20 @@
+pve-storage-hitachiblock (1.2.0~alpha24-1) stable; urgency=medium
+
+  * Clamp the reported storage API version to a tested range instead of
+    hard-coding it. api() now reports the running host's PVE::Storage::APIVER
+    capped at HB_MAX_APIVER (14, validated live on PVE 9.2.3), falling back to
+    HB_MAX_APIVER when the host version is unreadable. This loads warning-free on
+    any PVE whose APIVER is within range and degrades to PVE's recommended-upgrade
+    warning (never a load failure) on a newer PVE, instead of the previous
+    hard-coded 14 which would fail to load on an older host (api() > host APIVER
+    is refused) or warn whenever the host moved. We never report higher than the
+    host's APIVER (HB_MIN_APIVER documents the validated floor but is never forced
+    up, which would be refused). Adds an in-code compatibility map documenting
+    each APIVER's impact on our overridden methods. New t/unit/api.t asserts the
+    clamp above, below, within range, and on an unreadable host. (GitHub #17)
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 22:45:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha23-1) stable; urgency=medium
 
   * Implement qemu_blockdev_options() for the PVE 9 -blockdev disk-attachment
