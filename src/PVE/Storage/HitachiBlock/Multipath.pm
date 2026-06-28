@@ -18,6 +18,40 @@ sub new {
     }, $class;
 }
 
+# ── Validation / untaint helpers (issue #19) ──
+#
+# Array-sourced values (WWIDs, LDEV ids) and the device paths derived from them
+# flow into host-side tools (multipath, multipathd, blockdev) and sysfs. Validate
+# them against strict patterns at the boundary so a malformed or unexpected value
+# (microcode quirk, partial REST response, a future field-format change) is
+# rejected with an actionable error instead of reaching an external tool.
+# _run_cmd() is the final argv-untaint backstop; these give precise, early,
+# value-specific errors and normalise the WWID form in one place.
+
+# Normalise + validate a device WWID to the multipath '3<naa-hex>' form. Accepts
+# the bare NAA id (e.g. 60060e80...) or an already-'3'-prefixed id; both must be
+# pure hex. Returns the untainted '3<hex>' string; croaks on anything else.
+sub _dm_wwid {
+    my ($self, $wwid) = @_;
+
+    croak "wwid is required" unless defined $wwid && $wwid ne '';
+    my $dm = $wwid =~ /^3/ ? $wwid : "3$wwid";
+    $dm =~ /^(3[0-9a-fA-F]+)\z/
+        or croak "invalid device WWID '$wwid' (expected a hex NAA identifier)";
+    return $1;
+}
+
+# Validate an LDEV id used to synthesise WWIDs / device paths. Hitachi LDEV ids
+# are non-negative integers. Returns the untainted integer; croaks otherwise.
+sub _assert_ldev_id {
+    my ($self, $ldev_id) = @_;
+
+    croak "ldev_id is required" unless defined $ldev_id;
+    $ldev_id =~ /^([0-9]+)\z/
+        or croak "invalid LDEV id '$ldev_id' (expected a non-negative integer)";
+    return int($1);
+}
+
 # ── FC WWN Discovery ──
 
 sub get_local_wwns {
@@ -134,10 +168,7 @@ sub wait_for_device {
 sub whitelist_wwid {
     my ($self, $wwid) = @_;
 
-    croak "wwid is required" unless $wwid;
-
-    my $dm_wwid = $wwid;
-    $dm_wwid = "3$wwid" unless $dm_wwid =~ /^3/;
+    my $dm_wwid = $self->_dm_wwid($wwid);
 
     eval { _run_cmd('multipath', '-a', $dm_wwid) };
     warn "multipath -a $dm_wwid warning: $@" if $@;
@@ -148,25 +179,23 @@ sub whitelist_wwid {
 sub get_device_path {
     my ($self, $wwid) = @_;
 
-    croak "wwid is required" unless $wwid;
+    # _dm_wwid validates (hex only) and untaints: the wwid comes from the registry
+    # file / sysfs (tainted), and PVE runs mkfs/mount on this path via exec, which
+    # dies "Insecure dependency" under pct's taint mode if the path is tainted.
+    my $dm_wwid = $self->_dm_wwid($wwid);
 
-    # Normalize: multipath uses 3<naa_id> format for SCSI devices
-    my $dm_wwid = $wwid;
-    $dm_wwid = "3$wwid" unless $dm_wwid =~ /^3/;
-
-    # Untaint: the wwid comes from the registry file / sysfs (tainted). PVE runs
-    # mkfs/mount on this path via exec, which dies "Insecure dependency" under
-    # pct's taint mode if the path is tainted. A WWID is hex only.
-    $dm_wwid =~ /^(3[0-9a-fA-F]+)$/
-        or croak "invalid multipath wwid '$wwid'";
-
-    return "/dev/mapper/$1";
+    return "/dev/mapper/$dm_wwid";
 }
 
 sub get_device_size {
     my ($self, $path) = @_;
 
-    croak "path is required"      unless $path;
+    croak "path is required" unless $path;
+    # Only ever query our own multipath devices; validate + untaint the path so a
+    # malformed value never reaches blockdev.
+    $path =~ m{^(/dev/mapper/3[0-9a-fA-F]+)\z}
+        or croak "refusing to query non-multipath device path '$path'";
+    $path = $1;
     croak "Device $path not found" unless -e $path;
 
     my $size = _run_cmd('blockdev', '--getsize64', $path);
@@ -180,10 +209,7 @@ sub get_device_size {
 sub remove_device {
     my ($self, $wwid) = @_;
 
-    croak "wwid is required" unless $wwid;
-
-    my $dm_wwid = $wwid;
-    $dm_wwid = "3$wwid" unless $dm_wwid =~ /^3/;
+    my $dm_wwid = $self->_dm_wwid($wwid);
 
     # Flush multipath map
     eval { _run_cmd('multipath', '-f', $dm_wwid) };
@@ -255,10 +281,7 @@ sub _prune_wwid_entries {
 sub resize_device {
     my ($self, $wwid) = @_;
 
-    croak "wwid is required" unless $wwid;
-
-    my $dm_wwid = $wwid;
-    $dm_wwid = "3$wwid" unless $dm_wwid =~ /^3/;
+    my $dm_wwid = $self->_dm_wwid($wwid);
 
     # Rescan all SCSI paths for this device to pick up new size
     my @sd_devs = glob("/sys/block/sd*/device/wwid");
@@ -290,10 +313,7 @@ sub resize_device {
 sub flush_device {
     my ($self, $wwid) = @_;
 
-    croak "wwid is required" unless $wwid;
-
-    my $dm_wwid = $wwid;
-    $dm_wwid = "3$wwid" unless $dm_wwid =~ /^3/;
+    my $dm_wwid = $self->_dm_wwid($wwid);
 
     my $path = "/dev/mapper/$dm_wwid";
     if (-e $path) {
@@ -310,7 +330,7 @@ sub ldev_to_wwid {
     my ($self, $storage_serial, $ldev_id) = @_;
 
     croak "storage_serial is required" unless $storage_serial;
-    croak "ldev_id is required"        unless defined $ldev_id;
+    $ldev_id = $self->_assert_ldev_id($ldev_id);
 
     # Hitachi NAA format: 60060e80<serial_hex><ldev_hex>
     # The exact format depends on the array model; this is the common VSP pattern
@@ -336,7 +356,7 @@ sub ldev_to_wwid {
 sub discover_wwid {
     my ($self, $ldev_id) = @_;
 
-    croak "ldev_id is required" unless defined $ldev_id;
+    $ldev_id = $self->_assert_ldev_id($ldev_id);
     my $ldev_hex = sprintf("%04x", $ldev_id);
 
     my %seen;

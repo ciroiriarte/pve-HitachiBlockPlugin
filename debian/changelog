@@ -1,3 +1,21 @@
+pve-storage-hitachiblock (1.2.0~alpha25-1) stable; urgency=medium
+
+  * Validate/untaint array-sourced values before they reach host tools. Added
+    central Multipath helpers _dm_wwid() (normalise + validate a WWID to the
+    multipath '3<hex>' form) and _assert_ldev_id() (non-negative integer), and
+    applied them at every boundary: get_device_path, whitelist_wwid,
+    remove_device, resize_device, flush_device (WWID), ldev_to_wwid,
+    discover_wwid (LDEV id), plus a strict /dev/mapper/3<hex> guard in
+    get_device_size. A malformed/unexpected value (microcode quirk, partial REST
+    response, future field change) is now rejected with an actionable error
+    instead of being passed to multipath/multipathd/blockdev. This also removes
+    five copies of the ad-hoc '3'-prefix normalisation. _run_cmd() remains the
+    final argv-untaint backstop. New t/unit/validate.t exercises the real helpers
+    (accept valid, reject malformed); behaviour for valid inputs is unchanged
+    (verified live). (GitHub #19)
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sat, 27 Jun 2026 23:15:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha24-1) stable; urgency=medium
 
   * Clamp the reported storage API version to a tested range instead of

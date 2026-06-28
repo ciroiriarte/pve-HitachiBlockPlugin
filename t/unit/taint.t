@@ -56,6 +56,6 @@ my $path = $mp->get_device_path($tainted_wwid);
 is($path, '/dev/mapper/360060e8021a789005060a78900000100', 'get_device_path builds the 3<wwid> path');
 ok(!$is_tainted->($path), 'get_device_path returns an UNTAINTED path (safe for exec)');
 eval { $mp->get_device_path('not-a-wwid!') };
-like($@, qr/invalid multipath wwid/, 'get_device_path rejects a non-hex wwid');
+like($@, qr/invalid device WWID/, 'get_device_path rejects a non-hex wwid');
 
 done_testing();
