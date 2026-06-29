@@ -1,3 +1,20 @@
+pve-storage-hitachiblock (1.2.0~alpha36-1) stable; urgency=medium
+
+  * Behaviour-preserving refactor: collapse the duplicated snapshot-pair-by-group
+    lookups onto shared helpers (GitHub #35). No functional change.
+    - New _find_snapshot_id_by_group is the single owner of the legacy/volume-
+      specific snapshot-group naming table, which had been duplicated between
+      _resolve_snapshot_id and volume_snapshot_delete (a silent-drift hazard).
+      The delete fallback calls it directly (not _resolve_snapshot_id) so the
+      drifted-registry recovery path is preserved exactly.
+    - New _find_pair_by_group centralises the exact-group-name pair lookup;
+      routed through volume_snapshot, clone_image (+ its rollback) and the
+      consistency-group registration. free_image's OR-clause and the CG-rollback
+      delete-all loop are deliberately left inline (not equivalent).
+    - Added real-helper unit coverage. 185/185 unit tests; architect-reviewed.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Mon, 29 Jun 2026 15:30:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha35-1) stable; urgency=medium
 
   * Behaviour-preserving refactors and dead-code/test-quality cleanup (GitHub
