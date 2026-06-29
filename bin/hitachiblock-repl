@@ -74,6 +74,15 @@ GetOptions(\%opts,
 ) or pod2usage(2);
 
 pod2usage(1) if $opts{help};
+
+# pr-check is purely host-side (qemu-pr-helper + multipathd). It needs no storeid,
+# no credentials, and no array connection — dispatch it before any of that setup so
+# it works standalone on any node, even without a configured storage.
+if ($command eq 'pr-check') {
+    cmd_pr_check();
+    exit 0;
+}
+
 pod2usage("storeid is required") unless $opts{storeid};
 
 my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $opts{storeid});
@@ -104,10 +113,9 @@ my $client = PVE::Storage::HitachiBlock::RestClient->new(
 
 # `diagnostics` is a resilient, read-only support bundle: it must produce output
 # even when the management endpoint is unreachable, so it does its own guarded
-# (and timed) login probe rather than failing here.
-# `pr-check` is purely host-side (qemu-pr-helper + multipathd) and must never
-# block on array reachability, so it also skips the REST login.
-$client->login() unless $command eq 'diagnostics' || $command eq 'pr-check';
+# (and timed) login probe rather than failing here. (`pr-check` is dispatched
+# earlier and never reaches this array setup at all.)
+$client->login() unless $command eq 'diagnostics';
 
 my %DISPATCH = (
     'list'           => \&cmd_list,
@@ -124,7 +132,8 @@ my %DISPATCH = (
     'diagnostics'    => \&cmd_diagnostics,
     'lun-paths'      => \&cmd_lun_paths,
     'reconcile-maps' => \&cmd_reconcile_maps,
-    'pr-check'       => \&cmd_pr_check,
+    # NOTE: pr-check is dispatched early (above), before storeid/array setup —
+    # it is host-side only and intentionally not in this array-backed table.
 );
 
 eval {
