@@ -220,7 +220,7 @@ sub keepalive {
     return unless $self->{session_id};
 
     my $url = "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/sessions/$self->{session_id}";
-    my $res = $self->_request('PATCH', $url);
+    $self->_request('PATCH', $url);
     return 1;
 }
 

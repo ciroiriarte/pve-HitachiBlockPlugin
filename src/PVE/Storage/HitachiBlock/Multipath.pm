@@ -6,7 +6,6 @@ use warnings;
 use POSIX ();
 use Carp qw(croak);
 
-my $RESCAN_TIMEOUT  = 30;
 my $DEVICE_TIMEOUT  = 60;
 my $POLL_INTERVAL   = 2;
 

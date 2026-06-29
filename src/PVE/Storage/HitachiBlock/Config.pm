@@ -230,19 +230,6 @@ sub load_registry {
     return $data;
 }
 
-sub save_registry {
-    my ($self, $registry) = @_;
-
-    croak "registry must be a hashref" unless ref $registry eq 'HASH';
-
-    $self->_run_locked(sub {
-        $self->_write_registry_atomic($registry);
-        return [1];
-    });
-
-    return 1;
-}
-
 sub register_ldev {
     my ($self, $volname, $ldev_id, %meta) = @_;
 

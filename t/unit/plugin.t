@@ -373,22 +373,6 @@ subtest 'volume_has_feature_logic' => sub {
     is($check->('unknown', 0, undef), 0, 'unknown feature');
 };
 
-# ── Label Format ──
-
-subtest 'label_constraints' => sub {
-    # LDEV label has max length on Hitachi arrays (typically 32 chars)
-    my $label = "pve:myarray:vm-100-disk-1";
-    ok(length($label) <= 32, "label '$label' fits 32 chars (" . length($label) . ")");
-
-    # Longer storeid
-    my $long_label = "pve:verylongstoragename:vm-99999-disk-99";
-    if (length($long_label) > 32) {
-        pass("long label exceeds 32 chars (" . length($long_label) . ") - may need truncation");
-    } else {
-        pass("long label fits");
-    }
-};
-
 # ── LDEV Range Parsing ──
 
 subtest 'ldev_range_parsing' => sub {
