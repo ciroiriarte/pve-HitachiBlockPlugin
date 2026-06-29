@@ -776,7 +776,7 @@ sub free_image {
     # delete the underlying SCSI paths. This must happen before the array unmap —
     # otherwise the array refuses the unmap with "the LU is executing host I/O"
     # (multipathd's path checker keeps the paths active).
-    my $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+    my $wwid = $class->_wwid_for($scfg, $multipath, $meta, $ldev_id);
     eval { $multipath->remove_device($wwid) };
     warn "Device removal warning: $@" if $@;
 
@@ -871,6 +871,58 @@ sub list_images {
 
 # ── Volume Lifecycle ──
 
+# Centralizes the "use the WWID we recorded at provision time, else synthesize it
+# from the array serial + LDEV id" idiom. The stored WWID (discovered from the
+# real device) is authoritative; the synthesized NAA is the pre-discovery
+# fallback. Pure: ldev_to_wwid() does string math only, no array call.
+sub _wwid_for {
+    my ($class, $scfg, $multipath, $meta, $ldev_id) = @_;
+    return $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+}
+
+# Resolve a (volname, optional snapname) pair to the on-array LDEV id and the
+# WWID of the block device the host should act on. This is the snapshot-S-VOL vs
+# base-LDEV resolution ladder shared verbatim by activate_volume,
+# deactivate_volume, and filesystem_path; keeping it in one place stops the three
+# from drifting.
+#
+# $on_missing selects the not-found behavior, which differs by caller:
+#   'die'  -> die with the user-visible message (activate_volume, filesystem_path)
+#   'soft' -> return () so the caller can treat "nothing to do" as success
+#            (deactivate_volume's idempotent path)
+#
+# Returns ($ldev_id, $wwid) on success; () only under 'soft' when the volume or
+# snapshot is absent. $config and $multipath are passed in so the helper reuses
+# the caller's exact objects and call order (no extra/missing array calls).
+sub _resolve_target {
+    my ($class, $config, $multipath, $scfg, $volname, $snapname, $on_missing) = @_;
+
+    if ($snapname) {
+        my $snap_meta = $config->lookup_snapshot($volname, $snapname);
+        if ($on_missing eq 'soft') {
+            return () unless $snap_meta && defined $snap_meta->{svol_ldev_id};
+        } else {
+            die "Snapshot '$snapname' not found for volume '$volname'\n" unless $snap_meta;
+            die "Snapshot '$snapname' has no S-VOL LDEV\n" unless defined $snap_meta->{svol_ldev_id};
+        }
+
+        my $ldev_id = $snap_meta->{svol_ldev_id};
+        my $wwid = $snap_meta->{svol_wwid}
+            || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+        return ($ldev_id, $wwid);
+    } else {
+        my ($ldev_id, $meta) = $config->lookup_ldev($volname);
+        if ($on_missing eq 'soft') {
+            return () unless defined $ldev_id;
+        } else {
+            die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+        }
+
+        my $wwid = $class->_wwid_for($scfg, $multipath, $meta, $ldev_id);
+        return ($ldev_id, $wwid);
+    }
+}
+
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
@@ -878,25 +930,8 @@ sub activate_volume {
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
     my $client = $class->_client($storeid, $scfg);
 
-    my $target_ldev_id;
-    my $wwid;
-
-    if ($snapname) {
-        # Activate a snapshot's S-VOL
-        my $snap_meta = $config->lookup_snapshot($volname, $snapname);
-        die "Snapshot '$snapname' not found for volume '$volname'\n" unless $snap_meta;
-        die "Snapshot '$snapname' has no S-VOL LDEV\n" unless defined $snap_meta->{svol_ldev_id};
-
-        $target_ldev_id = $snap_meta->{svol_ldev_id};
-        $wwid = $snap_meta->{svol_wwid}
-            || $multipath->ldev_to_wwid($scfg->{storage_id}, $target_ldev_id);
-    } else {
-        my ($ldev_id, $meta) = $config->lookup_ldev($volname);
-        die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
-
-        $target_ldev_id = $ldev_id;
-        $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
-    }
+    my ($target_ldev_id, $wwid) =
+        $class->_resolve_target($config, $multipath, $scfg, $volname, $snapname, 'die');
 
     # Ensure LUN is mapped to this node (handles post-migration case)
     eval { $class->_map_lun_to_local($storeid, $scfg, $client, $target_ldev_id) };
@@ -915,23 +950,9 @@ sub deactivate_volume {
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
-    my $target_ldev_id;
-    my $wwid;
-
-    if ($snapname) {
-        my $snap_meta = $config->lookup_snapshot($volname, $snapname);
-        return 1 unless $snap_meta && defined $snap_meta->{svol_ldev_id};
-
-        $target_ldev_id = $snap_meta->{svol_ldev_id};
-        $wwid = $snap_meta->{svol_wwid}
-            || $multipath->ldev_to_wwid($scfg->{storage_id}, $target_ldev_id);
-    } else {
-        my ($ldev_id, $meta) = $config->lookup_ldev($volname);
-        return 1 unless defined $ldev_id;
-
-        $target_ldev_id = $ldev_id;
-        $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
-    }
+    my ($target_ldev_id, $wwid) =
+        $class->_resolve_target($config, $multipath, $scfg, $volname, $snapname, 'soft');
+    return 1 unless defined $target_ldev_id;
 
     # Flush and remove multipath device
     eval { $multipath->remove_device($wwid) };
@@ -977,21 +998,8 @@ sub filesystem_path {
     my $config = PVE::Storage::HitachiBlock::Config->new(storeid => $storeid);
     my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
 
-    my $wwid;
-
-    if ($snapname) {
-        my $snap_meta = $config->lookup_snapshot($volname, $snapname);
-        die "Snapshot '$snapname' not found for volume '$volname'\n" unless $snap_meta;
-        die "Snapshot '$snapname' has no S-VOL LDEV\n" unless defined $snap_meta->{svol_ldev_id};
-
-        $wwid = $snap_meta->{svol_wwid}
-            || $multipath->ldev_to_wwid($scfg->{storage_id}, $snap_meta->{svol_ldev_id});
-    } else {
-        my ($ldev_id, $meta) = $config->lookup_ldev($volname);
-        die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
-
-        $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
-    }
+    my (undef, $wwid) =
+        $class->_resolve_target($config, $multipath, $scfg, $volname, $snapname, 'die');
 
     my $path = $multipath->get_device_path($wwid);
 
@@ -1723,7 +1731,7 @@ sub volume_resize {
         if $additional <= 0;
 
     # Flush host buffers before expand (safety for running VMs)
-    my $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+    my $wwid = $class->_wwid_for($scfg, $multipath, $meta, $ldev_id);
     if ($running) {
         eval { $multipath->flush_device($wwid) };
         warn "Pre-resize flush warning: $@" if $@;
@@ -2433,7 +2441,7 @@ sub unmanage_volume {
 
     # Remove device and unmap from local node
     eval {
-        my $wwid = $meta->{wwid} || $multipath->ldev_to_wwid($scfg->{storage_id}, $ldev_id);
+        my $wwid = $class->_wwid_for($scfg, $multipath, $meta, $ldev_id);
         $multipath->remove_device($wwid);
         $class->_unmap_lun_from_local($storeid, $scfg, $client, $ldev_id);
     };

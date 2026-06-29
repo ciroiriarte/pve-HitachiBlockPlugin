@@ -141,7 +141,7 @@ sub _rewrite_host {
 
 sub _sessions_url {
     my ($self) = @_;
-    return "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/sessions";
+    return $self->_objects_url('sessions');
 }
 
 # ── Session Management ──
@@ -205,7 +205,7 @@ sub logout {
     my ($self) = @_;
     return unless $self->{session_id};
 
-    my $url = "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/sessions/$self->{session_id}";
+    my $url = $self->_objects_url("sessions/$self->{session_id}");
     eval {
         $self->_request('DELETE', $url, undef, 1);
     };
@@ -219,7 +219,7 @@ sub keepalive {
     my ($self) = @_;
     return unless $self->{session_id};
 
-    my $url = "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/sessions/$self->{session_id}";
+    my $url = $self->_objects_url("sessions/$self->{session_id}");
     $self->_request('PATCH', $url);
     return 1;
 }
@@ -891,6 +891,39 @@ sub _url {
     return $self->{base_url} . $path;
 }
 
+# Build a ConfigurationManager v1/objects URL for a suffix that is NOT
+# storage-scoped (sessions, jobs).  All hand-assembled literals that share
+# the prefix https://<host>:<port>/ConfigurationManager/v1/objects/ funnel
+# through here so the prefix is owned in one place.
+sub _objects_url {
+    my ($self, $suffix) = @_;
+    return "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/$suffix";
+}
+
+# Apply HTTP authentication to $req based on the current mode: basic auth for
+# session-less clients, session token for established sessions, nothing if no
+# token yet (login not yet called).  Extracted to eliminate the identical
+# if/elsif block that appears at both the initial request build and the
+# post-failover re-auth site inside _request.
+sub _apply_auth {
+    my ($self, $req) = @_;
+    if ($self->{sessionless}) {
+        $req->authorization_basic($self->{username}, $self->{password});
+    } elsif ($self->{token}) {
+        $req->header('Authorization' => "Session $self->{token}");
+    }
+    return;
+}
+
+# Return the bare API path segment of $url for use in log messages: everything
+# from /v1/objects/ onwards, with the long base URL stripped.  Produces the
+# same string the three inline s{^.*/v1/objects/}{/} substitutions produced.
+sub _short_path {
+    my ($self, $url) = @_;
+    (my $path = $url) =~ s{^.*/v1/objects/}{/};
+    return $path;
+}
+
 # Accumulate per-request latency so callers (e.g. the diagnostics bundle, #18) can
 # report management-endpoint responsiveness — the GUM is intrinsically slow, so
 # per-call timing is a primary troubleshooting signal. Stats live on the client
@@ -906,8 +939,7 @@ sub _record_rest_timing {
     if ($secs > $s->{max}) {
         $s->{max}        = $secs;
         # Record the bare API path (drop the long base URL) for a readable report.
-        (my $path = $url) =~ s{^.*/v1/objects/}{/};
-        $s->{slowest} = "$method $path";
+        $s->{slowest} = "$method " . $self->_short_path($url);
     }
     return;
 }
@@ -961,11 +993,7 @@ sub _request {
 
     # Session-less mode authenticates each request with HTTP basic auth and never
     # creates a persistent session (#26); otherwise use the session token.
-    if ($self->{sessionless}) {
-        $req->authorization_basic($self->{username}, $self->{password});
-    } elsif ($self->{token}) {
-        $req->header('Authorization' => "Session $self->{token}");
-    }
+    $self->_apply_auth($req);
 
     if ($body) {
         my $json = encode_json($body);
@@ -973,8 +1001,7 @@ sub _request {
         # Only build the (redacted) trace line when level 3 is active, so the
         # common debug=0 path does no extra work per request.
         if (($self->{debug} // 0) >= 3) {
-            (my $logpath = $url) =~ s{^.*/v1/objects/}{/};
-            $self->_debug(3, "$method $logpath body=" . $self->_redact($json));
+            $self->_debug(3, "$method " . $self->_short_path($url) . " body=" . $self->_redact($json));
         }
     }
 
@@ -989,9 +1016,8 @@ sub _request {
         $self->_record_rest_timing($method, $url, $elapsed);
 
         if (($self->{debug} // 0) >= 2) {
-            (my $logpath = $url) =~ s{^.*/v1/objects/}{/};
             $self->_debug(2, sprintf('%s %s -> %s (%d ms)',
-                $method, $logpath, $res->code, int($elapsed * 1000)));
+                $method, $self->_short_path($url), $res->code, int($elapsed * 1000)));
             $self->_debug(3, 'response body=' . $self->_redact($res->content // ''))
                 if length($res->content // '');
         }
@@ -1031,11 +1057,7 @@ sub _request {
             $req->uri($url);
             # Re-apply auth for the survivor: basic auth is host-independent, the
             # session token is per-controller and was just refreshed by login().
-            if ($self->{sessionless}) {
-                $req->authorization_basic($self->{username}, $self->{password});
-            } elsif ($self->{token}) {
-                $req->header('Authorization' => "Session $self->{token}");
-            }
+            $self->_apply_auth($req);
             next;
         }
 
@@ -1082,7 +1104,7 @@ sub _wait_for_job {
     # resource instead of a jobId in the body. Derive the job URL from either.
     my $url;
     if ($job_id) {
-        $url = "https://$self->{mgmt_ip}:$self->{port}/ConfigurationManager/v1/objects/jobs/$job_id";
+        $url = $self->_objects_url("jobs/$job_id");
     } elsif ($res->{location}) {
         my $loc = $res->{location};
         # Location may be absolute or relative to the API root.

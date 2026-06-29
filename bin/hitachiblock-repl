@@ -30,6 +30,7 @@ use warnings;
 use Getopt::Long;
 use Pod::Usage;
 use Time::HiRes ();
+use JSON ();
 
 use lib '/usr/share/perl5';
 
@@ -105,38 +106,27 @@ my $client = PVE::Storage::HitachiBlock::RestClient->new(
 # (and timed) login probe rather than failing here.
 $client->login() unless $command eq 'diagnostics';
 
+my %DISPATCH = (
+    'list'           => \&cmd_list,
+    'create-tc'      => sub { cmd_create('TC') },
+    'create-ur'      => sub { cmd_create('UR') },
+    'create-gad'     => sub { cmd_create('GAD') },
+    'status'         => \&cmd_status,
+    'split'          => \&cmd_split,
+    'resync'         => \&cmd_resync,
+    'delete'         => \&cmd_delete,
+    'remote-list'    => \&cmd_remote_list,
+    'remote-add'     => \&cmd_remote_add,
+    'orphans'        => \&cmd_orphans,
+    'diagnostics'    => \&cmd_diagnostics,
+    'lun-paths'      => \&cmd_lun_paths,
+    'reconcile-maps' => \&cmd_reconcile_maps,
+);
+
 eval {
-    if ($command eq 'diagnostics') {
-        cmd_diagnostics();
-    } elsif ($command eq 'list') {
-        cmd_list();
-    } elsif ($command eq 'create-tc') {
-        cmd_create('TC');
-    } elsif ($command eq 'create-ur') {
-        cmd_create('UR');
-    } elsif ($command eq 'create-gad') {
-        cmd_create('GAD');
-    } elsif ($command eq 'status') {
-        cmd_status();
-    } elsif ($command eq 'split') {
-        cmd_split();
-    } elsif ($command eq 'resync') {
-        cmd_resync();
-    } elsif ($command eq 'delete') {
-        cmd_delete();
-    } elsif ($command eq 'remote-list') {
-        cmd_remote_list();
-    } elsif ($command eq 'remote-add') {
-        cmd_remote_add();
-    } elsif ($command eq 'orphans') {
-        cmd_orphans();
-    } elsif ($command eq 'lun-paths') {
-        cmd_lun_paths();
-    } elsif ($command eq 'reconcile-maps') {
-        cmd_reconcile_maps();
-    } else {
-        die "Unknown command: '$command'\nRun with --help for usage.\n";
-    }
+    my $handler = $DISPATCH{$command}
+        or die "Unknown command: '$command'\nRun with --help for usage.\n";
+    $handler->();
 };
 
 my $err = $@;
@@ -150,11 +140,7 @@ exit 0;
 sub cmd_list {
     my $pairs = $client->list_remote_copy_pairs();
 
-    if ($opts{json}) {
-        require JSON;
-        print JSON::encode_json($pairs) . "\n";
-        return;
-    }
+    return emit_json($pairs) if $opts{json};
 
     printf "%-12s %-20s %-6s %-8s %-8s %-10s\n",
         'PAIR_ID', 'COPY_GROUP', 'TYPE', 'P-VOL', 'S-VOL', 'STATUS';
@@ -207,11 +193,7 @@ sub cmd_status {
 
     my $pair = $client->get_remote_copy_pair($opts{'pair-id'});
 
-    if ($opts{json}) {
-        require JSON;
-        print JSON::encode_json($pair) . "\n";
-        return;
-    }
+    return emit_json($pair) if $opts{json};
 
     print "Pair ID:      " . ($pair->{copyPairId} || '-') . "\n";
     print "Copy Group:   " . ($pair->{copyGroupName} || '-') . "\n";
@@ -246,11 +228,7 @@ sub cmd_delete {
 sub cmd_remote_list {
     my $remotes = $client->list_remote_storages();
 
-    if ($opts{json}) {
-        require JSON;
-        print JSON::encode_json($remotes) . "\n";
-        return;
-    }
+    return emit_json($remotes) if $opts{json};
 
     printf "%-20s %-16s %-10s\n", 'REMOTE_ID', 'IP', 'PATH_GROUP';
     print "-" x 50 . "\n";
@@ -352,15 +330,11 @@ sub cmd_orphans {
         }
     }
 
-    if ($opts{json}) {
-        require JSON;
-        print JSON::encode_json({
-            array_orphans    => \@array_orphans,
-            registry_orphans => \@registry_orphans,
-            cleaned          => $cleaned,
-        }) . "\n";
-        return;
-    }
+    return emit_json({
+        array_orphans    => \@array_orphans,
+        registry_orphans => \@registry_orphans,
+        cleaned          => $cleaned,
+    }) if $opts{json};
 
     print "Array orphans (labeled LDEVs not in registry):\n";
     print "  none\n" unless @array_orphans;
@@ -465,11 +439,7 @@ sub cmd_diagnostics {
         };
     }
 
-    if ($opts{json}) {
-        require JSON;
-        print JSON->new->canonical->encode(\%r) . "\n";
-        return;
-    }
+    return emit_json(\%r) if $opts{json};
 
     # ── Human-readable report ──
     print "=== Hitachi Block diagnostics ===\n";
@@ -589,11 +559,7 @@ sub cmd_lun_paths {
     my $rep = build_lun_path_report();
     my $budget = lun_path_budget();
 
-    if ($opts{json}) {
-        require JSON;
-        print JSON->new->canonical->encode($rep) . "\n";
-        return;
-    }
+    return emit_json($rep) if $opts{json};
 
     chomp(my $hostname = `hostname -s 2>/dev/null` || '');
     print "=== LU-path / host-group accounting (this node) ===\n";
@@ -643,11 +609,7 @@ sub cmd_reconcile_maps {
         $client, $rep, ldev_range => $range, apply => $apply,
     );
 
-    if ($opts{json}) {
-        require JSON;
-        print JSON->new->canonical->encode($res) . "\n";
-        return;
-    }
+    return emit_json($res) if $opts{json};
 
     if ($apply) {
         printf "Reconcile applied. Unmapped %d orphan LU path(s):\n", scalar @{ $res->{unmapped} };
@@ -666,6 +628,14 @@ sub cmd_reconcile_maps {
 }
 
 # ── Helpers ──
+
+# Emit $data as canonical (sorted-key) JSON and return. Used by every subcommand
+# for --json output so key order is deterministic across all commands.
+sub emit_json {
+    my ($data) = @_;
+    print JSON->new->canonical->encode($data) . "\n";
+    return;
+}
 
 # Best-effort plugin package version (dpkg), or 'unknown'.
 sub _plugin_version {
