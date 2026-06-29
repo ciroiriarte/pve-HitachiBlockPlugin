@@ -23,6 +23,7 @@
 #   diagnostics   Read-only support bundle (config/REST health/drift/devices)
 #   lun-paths     Report per-node LU-path/host-group counts + headroom (read-only)
 #   reconcile-maps Unmap orphan LU paths on this node (dry-run unless --apply)
+#   pr-check      SCSI-3 PR readiness: qemu-pr-helper + multipath reservation_key (read-only, no array login)
 
 use strict;
 use warnings;
@@ -104,7 +105,9 @@ my $client = PVE::Storage::HitachiBlock::RestClient->new(
 # `diagnostics` is a resilient, read-only support bundle: it must produce output
 # even when the management endpoint is unreachable, so it does its own guarded
 # (and timed) login probe rather than failing here.
-$client->login() unless $command eq 'diagnostics';
+# `pr-check` is purely host-side (qemu-pr-helper + multipathd) and must never
+# block on array reachability, so it also skips the REST login.
+$client->login() unless $command eq 'diagnostics' || $command eq 'pr-check';
 
 my %DISPATCH = (
     'list'           => \&cmd_list,
@@ -121,6 +124,7 @@ my %DISPATCH = (
     'diagnostics'    => \&cmd_diagnostics,
     'lun-paths'      => \&cmd_lun_paths,
     'reconcile-maps' => \&cmd_reconcile_maps,
+    'pr-check'       => \&cmd_pr_check,
 );
 
 eval {
@@ -627,6 +631,38 @@ sub cmd_reconcile_maps {
     }
 }
 
+# Read-only host-side check: is this node ready to service SCSI-3 Persistent
+# Reservations? Delegates entirely to Multipath->check_pr_ready() — zero
+# duplicated detection logic here. Does NOT contact the array REST endpoint.
+sub cmd_pr_check {
+    chomp(my $hostname = `hostname -s 2>/dev/null` || '');
+
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+    my $result = $mp->check_pr_ready();
+
+    if ($opts{json}) {
+        return emit_json({
+            node   => $hostname,
+            ok     => $result->{ok},
+            issues => $result->{issues},
+        });
+    }
+
+    my $pr_helper_ok = !grep { /qemu-pr-helper/ } @{ $result->{issues} };
+    my $resv_key_ok  = !grep { /reservation_key/ } @{ $result->{issues} };
+
+    print "=== SCSI-3 PR readiness check ===\n";
+    printf "node:                       %s\n", $hostname;
+    printf "qemu-pr-helper socket:      %s\n", ($pr_helper_ok  ? 'active'         : 'NOT active');
+    printf "multipath reservation_key:  %s\n", ($resv_key_ok   ? 'configured'     : 'not configured');
+    printf "\nOverall: %s\n",                   ($result->{ok}  ? 'READY'          : 'NOT READY');
+
+    if (@{ $result->{issues} }) {
+        print "\nIssues:\n";
+        printf "  - %s\n", $_ for @{ $result->{issues} };
+    }
+}
+
 # ── Helpers ──
 
 # Emit $data as canonical (sorted-key) JSON and return. Used by every subcommand
@@ -727,6 +763,9 @@ hitachiblock-repl - Hitachi Block Storage Replication CLI
     reconcile-maps    Unmap orphan LU paths (LDEV no longer in the registry) in
                       this node's host groups; DRY-RUN unless --apply,
                       ldev_range-fenced
+    pr-check          SCSI-3 PR readiness: verify qemu-pr-helper socket is
+                      active and multipath reservation_key is configured on
+                      this node; read-only, no array login required
 
   Options:
     --storeid         PVE storage ID (for credentials and config lookup)
@@ -792,5 +831,9 @@ hitachiblock-repl - Hitachi Block Storage Replication CLI
   # Capture a read-only support bundle for a bug report (no secrets, no mutations)
   hitachiblock-repl diagnostics --storeid myarray
   hitachiblock-repl diagnostics --storeid myarray --json > bundle.json
+
+  # Check SCSI-3 PR readiness on this node (no array login needed)
+  hitachiblock-repl pr-check --storeid myarray
+  hitachiblock-repl pr-check --storeid myarray --json
 
 =cut

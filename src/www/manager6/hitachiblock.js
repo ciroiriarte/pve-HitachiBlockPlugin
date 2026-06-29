@@ -242,6 +242,18 @@ Ext.define('PVE.storage.HitachiBlockInputPanel', {
             },
             {
                 xtype: 'proxmoxcheckbox',
+                name: 'persistent_reservations',
+                fieldLabel: gettext('SCSI-3 PR readiness'),
+                // Opt-in: when set, activate_volume validates this node's host-side
+                // PR plumbing (qemu-pr-helper + multipath reservation_key) for the
+                // LUN and warns if not ready. Validate-and-warn only; never edits
+                // multipath.conf. For shared/clustered guest disks. Off by default.
+                boxLabel: gettext('Validate host SCSI-3 PR plumbing (clustered disks)'),
+                uncheckedValue: 0,
+                deleteDefaultValue: !me.isCreate,
+            },
+            {
+                xtype: 'proxmoxcheckbox',
                 name: 'rest_keepalive',
                 fieldLabel: gettext('Keep REST session'),
                 // Off (session-less) is the default; only enable for arrays that

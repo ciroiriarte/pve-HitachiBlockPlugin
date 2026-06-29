@@ -30,6 +30,11 @@ using the plugin against any real array.
   host-group caps, the per-node host-side ceiling, the late-binding and port-group-sharding
   levers, why there is no VVols/Protocol-Endpoint equivalent on Linux, and a worked sizing
   example. Measure live headroom with `hitachiblock-repl lun-paths`.
+- **[Clustered Shared Disks & SCSI-3 PR](clustered-disks.md)** — multi-node LUN
+  presentation, what the plugin guarantees vs not (write safety is the guest cluster's
+  responsibility), host prerequisites (`qemu-pr-helper`, multipath `reservation_key`),
+  enabling `persistent_reservations`, and guest-side virtio-scsi / pr-manager-helper
+  wiring.
 - **[Vendor reference extracts](reference/)** — implementation-relevant Markdown
   distillations of the Hitachi PDFs (with page citations):
   - [`rest-api-extract.md`](reference/rest-api-extract.md) — Configuration Manager

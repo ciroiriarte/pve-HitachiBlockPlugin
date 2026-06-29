@@ -40,6 +40,22 @@ Install any missing dependencies:
 apt-get install libwww-perl libjson-perl libio-socket-ssl-perl
 ```
 
+### SCSI-3 Persistent Reservations (optional)
+
+Required only when using clustered shared disks (Windows Failover Clustering, OCFS2,
+GFS2, Oracle RAC). Enable the QEMU PR helper socket on each node that will run
+clustered guests:
+
+```bash
+systemctl enable --now qemu-pr-helper.socket
+```
+
+A per-node `reservation_key` in `multipath.conf` is also required so the reservation
+survives path failover — see [Clustered Shared Disks](clustered-disks.md) for the
+full setup procedure and `multipath.conf` examples.
+
+---
+
 ### SAN Zoning
 
 Fibre Channel zoning must be configured between:

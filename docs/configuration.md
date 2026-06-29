@@ -72,6 +72,7 @@ hitachiblock: myarray
 | `qos_priority` | None | QoS priority level: `1` = high, `2` = medium, `3` = low |
 | `ldev_range` | None | Restrict LDEV allocation to a numeric range (e.g., `1000-1999` or `0x3E8-0x7CF`). Prefer **CU-aligned** ranges — see below. |
 | `discard_zero_page` | `0` | When enabled (`1`), reclaims zero pages on `deactivate_volume` |
+| `persistent_reservations` | `0` | When enabled (`1`), `activate_volume` validates this node's host-side SCSI-3 PR plumbing (qemu-pr-helper socket + multipath `reservation_key`) and warns (non-fatal) if not ready. Validate-and-warn only — the plugin never edits `multipath.conf`, never registers PR keys, and never blocks activation. The guest-side opt-in (virtio-scsi disk bound to a `pr-manager-helper` object) is configured per-disk by the operator; see the [Clustered Shared Disks runbook](clustered-disks.md). No effect on single-owner volumes. |
 | `port_scheduler` | `0` | When enabled (`1`) and more than two `target_ports` are configured, each volume is mapped to a stable pair of ports chosen deterministically from its LDEV ID, spreading volumes across FC ports while preserving multipath redundancy |
 | `copy_speed` | None | Array-side copy speed for clone/migration operations (integer, 1-15) |
 | `group_delete` | `0` | When enabled (`1`), automatically deletes empty host groups on deactivate |

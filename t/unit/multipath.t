@@ -219,4 +219,60 @@ WWIDS
     ok($ok2, 'invalid wwid is a no-op (no die)');
 };
 
+# ── SCSI-3 PR readiness (issue #2): validate-and-warn, stub the two seams ──
+subtest 'check_pr_ready' => sub {
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+    no warnings 'redefine';
+    no strict 'refs';
+    my $P = 'PVE::Storage::HitachiBlock::Multipath';
+
+    { local *{"${P}::_pr_helper_active"} = sub { 1 };
+      local *{"${P}::_multipath_reservation_key_configured"} = sub { 1 };
+      my $r = $mp->check_pr_ready('360060e80abc');
+      is($r->{ok}, 1, 'ready when both prerequisites are present');
+      is_deeply($r->{issues}, [], 'no issues when ready'); }
+
+    { local *{"${P}::_pr_helper_active"} = sub { 0 };
+      local *{"${P}::_multipath_reservation_key_configured"} = sub { 1 };
+      my $r = $mp->check_pr_ready('x');
+      is($r->{ok}, 0, 'not ready when qemu-pr-helper is missing');
+      is(scalar @{$r->{issues}}, 1, 'one issue reported');
+      like($r->{issues}[0], qr/qemu-pr-helper/, 'issue names qemu-pr-helper'); }
+
+    { local *{"${P}::_pr_helper_active"} = sub { 1 };
+      local *{"${P}::_multipath_reservation_key_configured"} = sub { 0 };
+      my $r = $mp->check_pr_ready('x');
+      is($r->{ok}, 0, 'not ready when reservation_key is missing');
+      like($r->{issues}[0], qr/reservation_key/, 'issue names reservation_key'); }
+
+    { local *{"${P}::_pr_helper_active"} = sub { 0 };
+      local *{"${P}::_multipath_reservation_key_configured"} = sub { 0 };
+      my $r = $mp->check_pr_ready('x');
+      is($r->{ok}, 0, 'not ready when both are missing');
+      is(scalar @{$r->{issues}}, 2, 'both issues reported'); }
+};
+
+# Parse seam for the multipath reservation_key directive (read-only).
+subtest '_multipath_reservation_key_configured parses multipathd config' => sub {
+    my $mp = PVE::Storage::HitachiBlock::Multipath->new();
+    no warnings 'redefine';
+    no strict 'refs';
+    my $P = 'PVE::Storage::HitachiBlock::Multipath';
+
+    local *{"${P}::_run_cmd"} = sub { "defaults {\n\treservation_key 0x123456789abcdef0\n}\n" };
+    is($mp->_multipath_reservation_key_configured(), 1, 'detects a configured hex key');
+
+    local *{"${P}::_run_cmd"} = sub { "defaults {\n\treservation_key file\n}\n" };
+    is($mp->_multipath_reservation_key_configured(), 1, 'detects the file-based key form');
+
+    local *{"${P}::_run_cmd"} = sub { qq(defaults {\n\treservation_key "0"\n}\n) };
+    is($mp->_multipath_reservation_key_configured(), 0, 'reservation_key "0" means disabled');
+
+    local *{"${P}::_run_cmd"} = sub { "defaults {\n\tpolling_interval 5\n}\n" };
+    is($mp->_multipath_reservation_key_configured(), 0, 'absent directive = not configured');
+
+    local *{"${P}::_run_cmd"} = sub { die "multipathd not running\n" };
+    is($mp->_multipath_reservation_key_configured(), 0, 'command failure = not configured (no die)');
+};
+
 done_testing();

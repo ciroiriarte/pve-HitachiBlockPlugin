@@ -181,6 +181,23 @@ sub properties {
             default     => 0,
             optional    => 1,
         },
+        persistent_reservations => {
+            description => "Opt-in SCSI-3 Persistent Reservation readiness for"
+                . " shared/clustered guest disks (e.g. Windows Failover Clustering)."
+                . " When enabled, on activate_volume the plugin VALIDATES that this"
+                . " node's host-side PR plumbing is ready for the LUN's multipath"
+                . " device — the qemu-pr-helper socket and a multipath reservation_key"
+                . " — and WARNS (non-fatal) with actionable guidance if it is not. It"
+                . " is validate-and-warn only: the plugin never edits multipath.conf,"
+                . " never registers reservation keys, and never blocks activation. The"
+                . " guest-side step (a scsi-hd/scsi-block disk on virtio-scsi bound to a"
+                . " pr-manager-helper) is configured per-disk by the operator; see the"
+                . " clustered-disks runbook. Off by default; zero effect on normal"
+                . " single-owner volumes.",
+            type        => 'boolean',
+            default     => 0,
+            optional    => 1,
+        },
         platform => {
             description => "Storage platform type. Sets the default API port: 'vsp_one'"
                 . " and 'vsp_e' (e.g. VSP E590H, direct/embedded REST API) use 443;"
@@ -325,6 +342,7 @@ sub options {
         host_mode    => { optional => 1 },
         host_mode_options => { optional => 1 },
         skip_unmap_io_check => { optional => 1 },
+        persistent_reservations => { optional => 1 },
         platform     => { optional => 1 },
         mgmt_port    => { optional => 1 },
         nodes        => { optional => 1 },
@@ -940,6 +958,26 @@ sub activate_volume {
     # Rescan and wait for device
     $multipath->rescan_scsi_hosts();
     my $path = $multipath->wait_for_device($wwid);
+
+    # Opt-in SCSI-3 PR readiness (issue #2): when persistent_reservations is set,
+    # validate this node's host-side PR plumbing for the assembled device and warn
+    # (once, non-fatal) if it is not ready. Validate-and-warn only — never edits
+    # multipath.conf, never registers keys, never blocks activation. No effect when
+    # the option is off (the default).
+    if ($scfg->{persistent_reservations}) {
+        # PR readiness is advisory — wrap defensively so it can never abort
+        # activation even if a future check change starts throwing.
+        eval {
+            my $pr = $multipath->check_pr_ready($wwid);
+            unless ($pr->{ok}) {
+                my $msg = "SCSI-3 PR not ready for '$volname' ($wwid): "
+                    . join('; ', @{ $pr->{issues} });
+                $class->_debug($scfg, 1, $msg);
+                warn "$msg\n";
+            }
+        };
+        warn "SCSI-3 PR readiness check warning: $@" if $@;
+    }
 
     return 1;
 }

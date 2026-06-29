@@ -127,10 +127,18 @@ A LUN shared by clustered guests (or briefly during live-migration overlap) is m
 **every** participating node's host group. **SCSI-3 PR is LU-wide** — a reservation applies
 to the LDEV across *all* its ports/paths, not to a single port — so clustered-guest fencing
 works regardless of which ports each node uses; the nodes do **not** need to share ports,
-only the LDEV. Opt-in PR support for shared/clustered disks is tracked as
-**[GitHub #2](https://github.com/ciroiriarte/pve-HitachiBlockPlugin/issues/2)**. Note that a
+only the LDEV. Note that a
 shared LUN multiplies its LU-path footprint by the number of attached nodes — account for it
 explicitly in the per-port budget.
+
+Opt-in PR support is implemented via the `persistent_reservations` storage property
+(**[GitHub #2](https://github.com/ciroiriarte/pve-HitachiBlockPlugin/issues/2)**;
+see the [Clustered Shared Disks runbook](clustered-disks.md) for host prerequisites,
+`multipath.conf` setup, and the guest-side virtio-scsi / pr-manager-helper recipe).
+Multi-writer data safety — write ordering and fencing among the cluster nodes — is the
+guest cluster's responsibility, not the plugin's; see
+**[GitHub #3](https://github.com/ciroiriarte/pve-HitachiBlockPlugin/issues/3)** for
+multi-writer architecture guidance.
 
 ## Control-plane (management) session scaling
 

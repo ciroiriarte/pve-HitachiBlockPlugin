@@ -397,6 +397,66 @@ sub _read_first_line {
     return $line;
 }
 
+# ── SCSI-3 Persistent Reservation readiness (issue #2) ──
+
+# Default qemu-pr-helper socket (a package var so tests can localise it). QEMU
+# forwards a guest's PERSISTENT RESERVE IN/OUT to this helper, which executes them
+# against the real device.
+our $PR_HELPER_SOCK = '/run/qemu-pr-helper.sock';
+
+# Read-only check that this node's host-side SCSI-3 PR plumbing is ready to serve
+# a clustered guest on the given multipath device. Returns
+#   { ok => 0|1, issues => [ actionable message, ... ] }.
+# It NEVER mutates anything (no multipath.conf edits, no key registration) — it
+# only inspects, so the opt-in `persistent_reservations` path and hitachiblock-repl
+# can warn and let the operator fix it. $wwid is accepted for the caller's logging
+# context; the two prerequisites are node-level (the qemu-pr-helper and a global/
+# device reservation_key apply to all of the plugin's devices).
+sub check_pr_ready {
+    my ($self, $wwid) = @_;
+
+    my @issues;
+    unless ($self->_pr_helper_active()) {
+        push @issues, "qemu-pr-helper is not running on this node, so a guest's"
+            . " SCSI-3 PR commands cannot be serviced — enable it with"
+            . " 'systemctl enable --now qemu-pr-helper.socket'";
+    }
+    unless ($self->_multipath_reservation_key_configured()) {
+        push @issues, "multipath reservation_key is not configured, so a persistent"
+            . " reservation will not survive path failover — set reservation_key in"
+            . " multipath.conf (defaults{} globally, or a HITACHI/OPEN-V devices{}"
+            . " section) and reload multipathd";
+    }
+
+    return { ok => (@issues ? 0 : 1), issues => \@issues };
+}
+
+# Seam: is the qemu-pr-helper socket present/listening on this node?
+sub _pr_helper_active {
+    my ($self) = @_;
+    return (-S $PR_HELPER_SOCK) ? 1 : 0;
+}
+
+# Seam: does multipathd's effective config carry a usable (non-disabled)
+# reservation_key that would apply to our devices? Read-only parse of
+# `multipathd show config`; multipathd prints reservation_key "0" (or omits it)
+# when unset/disabled. Coarse/node-level by design: any non-zero reservation_key
+# line counts as configured (even one in an unrelated devices{} entry), so the
+# worst case is a false "ready" — never a false "not ready" that would block —
+# which is the right bias for validate-and-warn.
+sub _multipath_reservation_key_configured {
+    my ($self) = @_;
+
+    my $cfg = eval { _run_cmd('multipathd', 'show', 'config') };
+    return 0 unless defined $cfg;
+    for my $line (split /\n/, $cfg) {
+        next unless $line =~ /^\s*reservation_key\s+"?([^"\s]+)"?/;
+        my $val = $1;
+        return 1 if $val ne '0' && lc($val) ne 'none';
+    }
+    return 0;
+}
+
 sub _run_cmd {
     my (@cmd) = @_;
 
