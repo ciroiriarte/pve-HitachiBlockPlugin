@@ -1,3 +1,18 @@
+pve-storage-hitachiblock (1.2.0~alpha39-1) stable; urgency=medium
+
+  * Ship the qemu-pr-helper systemd units for SCSI-3 PR (GitHub #2, follow-up to
+    alpha37). On PVE the qemu-pr-helper binary ships with pve-qemu-kvm but Proxmox
+    does not package its systemd units (and Debian's qemu-system-common conflicts
+    with pve-qemu-kvm), so `systemctl enable --now qemu-pr-helper.socket` failed on
+    a stock node. The package now installs qemu-pr-helper.socket + .service to
+    /lib/systemd/system/, DISABLED (PR is opt-in: dh_installsystemd --no-enable
+    --no-start). Enabling the socket now works out of the box. Recommends
+    pve-qemu-kvm. Docs updated; new drift-guard test ties the unit socket path to
+    the plugin's readiness check. 196/196 unit tests. Found via live validation on
+    the VSP E590H (the .socket unit was absent on the lab nodes).
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Mon, 29 Jun 2026 20:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha38-1) stable; urgency=medium
 
   * Fix `hitachiblock-repl pr-check` requiring --storeid (GitHub #2, follow-up to
