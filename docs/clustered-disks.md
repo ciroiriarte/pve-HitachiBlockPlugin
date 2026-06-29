@@ -45,17 +45,22 @@ Both prerequisites are node-level — they cover all PR-enabled disks on the nod
 QEMU intercepts a guest's `PERSISTENT RESERVE IN/OUT` commands and forwards them to
 `qemu-pr-helper`, which executes them against the real block device on the host.
 
-Enable the socket unit:
+The `qemu-pr-helper` **binary** ships with `pve-qemu-kvm` (always present on a PVE
+node), but Proxmox does **not** package its systemd units. This plugin therefore ships
+them itself — `qemu-pr-helper.socket` and `qemu-pr-helper.service`, installed to
+`/lib/systemd/system/` but **disabled** (PR is opt-in). Enable the socket per node
+only when you use `persistent_reservations`:
 
 ```bash
 systemctl enable --now qemu-pr-helper.socket
 ```
 
-Verify the socket is listening:
+Enabling the socket makes `/run/qemu-pr-helper.sock` listen immediately; the service
+is socket-activated on the first connection from QEMU. Verify:
 
 ```bash
 ls -la /run/qemu-pr-helper.sock
-# Expected: srwxrwxrwx ... /run/qemu-pr-helper.sock
+# Expected: srw------- ... /run/qemu-pr-helper.sock   (SocketMode=0600)
 ```
 
 ### 2. Multipath reservation_key

@@ -16,6 +16,7 @@ Depends: ${misc:Depends},
          libwww-perl,
          libjson-perl,
          multipath-tools
+Recommends: pve-qemu-kvm
 Description: Proxmox VE storage plugin for Hitachi block storage
  Storage plugin for Proxmox VE that integrates with Hitachi FC-based
  block storage systems (VSP G series and VSP One Block).

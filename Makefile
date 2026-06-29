@@ -10,6 +10,11 @@ MODULES=$(wildcard $(MODULE_DIR)/*.pm)
 
 CONF_FILES=conf/storage.cfg.example conf/multipath.conf.d/hitachiblock-vsp.conf
 
+# systemd units shipped (DISABLED) for opt-in SCSI-3 PR (#2): the qemu-pr-helper
+# binary ships with pve-qemu-kvm but Proxmox does not package these units.
+SYSTEMD_UNITS=conf/systemd/qemu-pr-helper.socket conf/systemd/qemu-pr-helper.service
+SYSTEMD_UNIT_DIR=/lib/systemd/system
+
 # Web UI (manager6) integration
 GUI_SRC=src/www/manager6/hitachiblock.js
 PVE_MANAGER_JS=/usr/share/pve-manager/js
@@ -32,6 +37,12 @@ install:
 	# CLI tools
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 0755 bin/hitachiblock-repl $(DESTDIR)$(PREFIX)/bin/
+
+	# systemd units for opt-in SCSI-3 PR (#2), installed DISABLED. The .deb
+	# leaves them inactive via dh_installsystemd --no-enable --no-start; the
+	# operator enables the socket only when using persistent_reservations.
+	install -d $(DESTDIR)$(SYSTEMD_UNIT_DIR)
+	install -m 0644 $(SYSTEMD_UNITS) $(DESTDIR)$(SYSTEMD_UNIT_DIR)/
 
 	# Documentation
 	install -d $(DESTDIR)/usr/share/doc/$(PACKAGE)

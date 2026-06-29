@@ -43,8 +43,9 @@ apt-get install libwww-perl libjson-perl libio-socket-ssl-perl
 ### SCSI-3 Persistent Reservations (optional)
 
 Required only when using clustered shared disks (Windows Failover Clustering, OCFS2,
-GFS2, Oracle RAC). Enable the QEMU PR helper socket on each node that will run
-clustered guests:
+GFS2, Oracle RAC). This package ships the `qemu-pr-helper` systemd units (the binary
+comes with `pve-qemu-kvm`; Proxmox does not package the units), installed **disabled**.
+Enable the socket on each node that will run clustered guests:
 
 ```bash
 systemctl enable --now qemu-pr-helper.socket

@@ -5,3 +5,9 @@
 
 override_dh_auto_install:
 	$(MAKE) install DESTDIR=debian/pve-storage-hitachiblock
+
+# Ship the qemu-pr-helper units (opt-in SCSI-3 PR, #2) but DO NOT enable or start
+# them: PR is opt-in, so the operator enables qemu-pr-helper.socket per node only
+# when using persistent_reservations. dh_installsystemd still wires clean removal.
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start
