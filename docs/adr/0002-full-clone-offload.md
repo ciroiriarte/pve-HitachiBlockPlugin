@@ -12,7 +12,7 @@
 
 ## Context
 
-A natural goal for a VVols-like Hitachi plugin is to **offload a full VM disk
+A natural goal for a Hitachi block plugin is to **offload a full VM disk
 clone to the array** (ShadowImage / Thin Image full-copy, or a SCSI
 `EXTENDED COPY`/XCOPY/ODX token copy) so the data never traverses the PVE host.
 This ADR records whether `qm clone --full` can be wired to such an offload

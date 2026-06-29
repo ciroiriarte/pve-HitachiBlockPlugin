@@ -134,7 +134,7 @@ the plugin. It creates a **CoW Thin Image S-VOL** that shares blocks with its so
   live volume; use a full copy for that (see below).
 - The Thin Image pair is created **split** (`autoSplit=true`, `isClone` unset), leaving
   the S-VOL in `PSUS` — host-readable/writable yet still sharing unchanged blocks with
-  the P-VOL via the pool (copy-on-write) — instant and space-efficient (the vVols
+  the P-VOL via the pool (copy-on-write) — instant and space-efficient (a
   fast-deploy model). Multiple linked clones can share one base.
 - **Dependency**: the S-VOL shares blocks with the source. The plugin records this
   (`parent_volname`, plus `parent_snap` when cloned from a snapshot) and **refuses to

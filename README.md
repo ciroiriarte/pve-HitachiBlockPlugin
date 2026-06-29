@@ -3,7 +3,7 @@
 A [Proxmox VE](https://www.proxmox.com/) storage plugin for Hitachi Fibre Channel
 block storage (VSP One Block, VSP E series, and VSP G series). It provisions
 **one LUN per virtual disk** and offloads storage services — snapshots, clones,
-thin provisioning, QoS, replication — to the array, in the spirit of VMware vVols.
+thin provisioning, QoS, replication — to the array.
 
 [![OBS build (PVE 9)](https://build.opensuse.org/projects/home:ciriarte:pve-HitachiBlockPlugin/packages/pve-storage-hitachiblock/badge.svg?type=default)](https://build.opensuse.org/package/show/home:ciriarte:pve-HitachiBlockPlugin/pve-storage-hitachiblock)
 

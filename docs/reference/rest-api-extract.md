@@ -189,7 +189,7 @@ Key fact: **only in `PSUS`/`PFUS` is the S-VOL host R/W-accessible.** While `PSU
 - **`isClone=true`** (requires `svolLdevId` + `canCascade=true`, and typically `clonesAutomation=true`) → creates a pair with the clone attribute and, when cloned, performs a **full background copy of ALL P-VOL data to the S-VOL**, after which **the pair is automatically DELETED** (p. 513: "After all the data of the primary volume … is copied to the secondary volume, the pair is deleted"). Result: a **FULL, INDEPENDENT clone** (the former S-VOL is now a standalone DP volume that no longer shares blocks with the P-VOL). `copySpeed` controls the copy rate.
 - They are **mutually exclusive** (`autoSplit=true` forbidden with `isClone=true`).
 
-**Plugin note (VVol-like linked clone vs full clone):**
+**Plugin note (linked clone vs full clone):**
 - For a **PVE linked clone / fast snapshot** that shares space with the parent: create an LDEV for the S-VOL (or omit it), then `POST /snapshots` with `autoSplit=true`, `isClone` unset. The S-VOL ends in `PSUS` and is immediately host-usable while sharing blocks (thin/copy-on-write).
 - For a **PVE full clone** (independent volume): create the S-VOL as a DP volume of equal size, then `POST /snapshots` with `isClone=true`, `canCascade=true`, `clonesAutomation=true`, `svolLdevId=<new>`. Poll the job; the pair self-deletes when copy completes; the S-VOL is a standalone full copy. Use `copySpeed` to tune.
 - For capacity-saving (dedupe/compress) source volumes, set `isDataReductionForceCopy=true`.
