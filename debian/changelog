@@ -1,3 +1,20 @@
+pve-storage-hitachiblock (1.2.0~alpha34-1) stable; urgency=medium
+
+  * Fix the reconcile-maps ldev_range safety fence failing open on a HEX
+    ldev_range (GitHub #28, follow-up to alpha33). The REPL parsed only decimal
+    ranges, so a documented hex range (e.g. 0x3E8-0x7CF) yielded an undefined
+    fence — and on a multi-storeid array sharing target ports (same host group,
+    matched by the node's fixed WWN) `reconcile-maps --apply` could classify and
+    unmap another storeid's LIVE volumes. New
+    LunPaths->parse_ldev_range() accepts decimal AND hex (single source of truth,
+    rejects reversed ranges), and reconcile-maps now FAILS CLOSED: --apply is
+    refused unless the ldev_range parses, so a fence-less unmap is structurally
+    impossible (dry-run still works for visibility). New unit tests cover hex/
+    decimal/invalid/reversed parsing and a hex-derived reconcile fence; minor
+    deslop (shared budget/orphan-print helpers). 188/188 unit tests pass.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Mon, 29 Jun 2026 00:30:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha33-1) stable; urgency=medium
 
   * Surface per-node LU-path / host-group counts and add a guarded orphan-map

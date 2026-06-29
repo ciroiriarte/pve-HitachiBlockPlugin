@@ -552,27 +552,42 @@ sub build_lun_path_report {
     }
 
     my @ports = grep { length } map { s/^\s+|\s+$//gr } split(/,/, $scfg->{target_ports} || '');
-    my $budget = $opts{'lun-path-budget'} || $DEFAULT_LUN_PATH_BUDGET;
 
     return PVE::Storage::HitachiBlock::LunPaths->scan(
         client           => $client,
         wwns             => $wwns,
         target_ports     => \@ports,
         registered_ldevs => \%registered,
-        per_port_budget  => $budget,
+        per_port_budget  => lun_path_budget(),
     );
 }
 
-# Parse the storage's ldev_range into [min,max], or undef if unset/invalid.
+# Effective per-port LU-path budget: --lun-path-budget or the default.
+sub lun_path_budget { return $opts{'lun-path-budget'} || $DEFAULT_LUN_PATH_BUDGET }
+
+# Print "LDEV <id>  lun <lun_id>  port <port>" for each orphan path entry.
+sub print_orphan_lines {
+    my ($list) = @_;
+    printf "  LDEV %-6s lun %-14s port %s\n", $_->{ldev_id}, $_->{lun_id}, $_->{port}
+        for @$list;
+}
+
+# Parse the storage's ldev_range (decimal OR hex, e.g. '256-511' or '0x100-0x1FF')
+# into ([min,max], 'ok'). Returns (undef,'unset') when no range is configured and
+# (undef,'unparseable') when set but malformed. ldev_range is the load-bearing
+# safety fence for reconcile (it keeps the orphan unmap off other storeids' LUNs in
+# a shared host group), so the status is used to refuse a fence-less --apply. Hex
+# support mirrors the plugin's own ldev_range parser.
 sub lun_path_ldev_range {
-    my $r = $scfg->{ldev_range} or return undef;
-    my ($min, $max) = $r =~ /^\s*(\d+)\s*-\s*(\d+)\s*$/ or return undef;
-    return [ $min, $max ];
+    my $r = $scfg->{ldev_range};
+    return (undef, 'unset') unless defined $r && length $r;
+    my $range = PVE::Storage::HitachiBlock::LunPaths->parse_ldev_range($r);
+    return $range ? ($range, 'ok') : (undef, 'unparseable');
 }
 
 sub cmd_lun_paths {
     my $rep = build_lun_path_report();
-    my $budget = $opts{'lun-path-budget'} || $DEFAULT_LUN_PATH_BUDGET;
+    my $budget = lun_path_budget();
 
     if ($opts{json}) {
         require JSON;
@@ -598,8 +613,7 @@ sub cmd_lun_paths {
 
     my @orphans = @{ $rep->{orphans} };
     printf "orphan LU paths (mapped here, LDEV not in registry): %d\n", scalar @orphans;
-    printf "  LDEV %-6s lun %-14s port %s\n", $_->{ldev_id}, $_->{lun_id}, $_->{port}
-        for @orphans;
+    print_orphan_lines(\@orphans);
     print "  (run 'reconcile-maps' to clean them up)\n" if @orphans;
 
     for my $ob (@{ $rep->{over_budget} }) {
@@ -610,8 +624,20 @@ sub cmd_lun_paths {
 
 sub cmd_reconcile_maps {
     my $rep   = build_lun_path_report();
-    my $range = lun_path_ldev_range();
+    my ($range, $range_status) = lun_path_ldev_range();
     my $apply = $opts{apply} ? 1 : 0;
+
+    # The ldev_range fence is what keeps reconcile from unmapping another storeid's
+    # live volumes that share this node's host group. Without a valid fence, refuse
+    # to --apply (dry-run is still allowed for visibility). 'unset' and 'unparseable'
+    # both fail closed.
+    if ($apply && !$range) {
+        die "reconcile-maps --apply refused: ldev_range is '$range_status' for"
+            . " storeid '$opts{storeid}'. A valid ldev_range fence is required to"
+            . " safely unmap (it keeps reconcile off other storeids' LUNs sharing"
+            . " this host group). Configure ldev_range, or run without --apply for a"
+            . " dry-run.\n";
+    }
 
     my $res = PVE::Storage::HitachiBlock::LunPaths->reconcile(
         $client, $rep, ldev_range => $range, apply => $apply,
@@ -625,13 +651,11 @@ sub cmd_reconcile_maps {
 
     if ($apply) {
         printf "Reconcile applied. Unmapped %d orphan LU path(s):\n", scalar @{ $res->{unmapped} };
-        printf "  LDEV %-6s lun %-14s port %s\n", $_->{ldev_id}, $_->{lun_id}, $_->{port}
-            for @{ $res->{unmapped} };
+        print_orphan_lines($res->{unmapped});
     } else {
         printf "DRY-RUN (use --apply to unmap). Would unmap %d orphan LU path(s):\n",
             scalar @{ $res->{would_unmap} };
-        printf "  LDEV %-6s lun %-14s port %s\n", $_->{ldev_id}, $_->{lun_id}, $_->{port}
-            for @{ $res->{would_unmap} };
+        print_orphan_lines($res->{would_unmap});
         print "  none\n" unless @{ $res->{would_unmap} };
     }
     if (@{ $res->{skipped} }) {

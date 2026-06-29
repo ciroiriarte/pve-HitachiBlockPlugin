@@ -159,4 +159,30 @@ subtest 'reconcile: unmap failure is captured as skipped' => sub {
     like($f->{reason}, qr/unmap failed/, 'failure reason recorded');
 };
 
+# ── parse_ldev_range: decimal AND hex (#28 fence must not fail open on hex) ──
+subtest 'parse_ldev_range decimal/hex/invalid' => sub {
+    is_deeply($C->parse_ldev_range('256-511'), [256, 511], 'decimal range');
+    is_deeply($C->parse_ldev_range(' 256 - 511 '), [256, 511], 'whitespace tolerated');
+    is_deeply($C->parse_ldev_range('0x100-0x1FF'), [256, 511], 'hex range parsed to ints');
+    is_deeply($C->parse_ldev_range('0x3E8-0x7CF'), [1000, 1999], 'hex range (doc example)');
+    is($C->parse_ldev_range(undef), undef, 'undef -> undef');
+    is($C->parse_ldev_range(''), undef, 'empty -> undef');
+    is($C->parse_ldev_range('garbage'), undef, 'malformed -> undef');
+    is($C->parse_ldev_range('256'), undef, 'single value -> undef');
+    is($C->parse_ldev_range('511-256'), undef, 'reversed range -> undef (fails closed)');
+};
+
+subtest 'reconcile honours a hex-derived range' => sub {
+    # ldev 300 is inside 0x100-0x1FF (256-511); 5000 is outside.
+    my $cli = make_client();
+    my $rep = $C->scan(client => $cli, wwns => ['aa'], target_ports => ['CL1-A'],
+        registered_ldevs => \%registered);
+    my $range = $C->parse_ldev_range('0x100-0x1FF');
+    my $res = $C->reconcile($cli, $rep, ldev_range => $range, apply => 1);
+    is_deeply([ map { $_->{ldev_id} } @{ $res->{unmapped} } ], [300],
+        'in-range orphan unmapped via a hex-derived fence');
+    is(scalar(grep { $_->{ldev_id} == 5000 } @{ $res->{skipped} }), 1,
+        'out-of-range orphan still skipped under a hex fence');
+};
+
 done_testing();

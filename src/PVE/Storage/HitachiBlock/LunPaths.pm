@@ -27,6 +27,21 @@ use Carp qw(croak);
 # Default fraction of a port's LU-path budget at which scan() flags it.
 our $BUDGET_THRESHOLD = 0.8;
 
+# Parse an ldev_range string (decimal OR hex, e.g. '256-511' or '0x100-0x1FF')
+# into [min,max], or undef if undefined/empty/malformed. Single source of truth
+# for the reconcile() safety fence range; hex support mirrors the plugin's own
+# ldev_range parser so a hex-configured range never silently disables the fence.
+sub parse_ldev_range {
+    my ($class, $str) = @_;
+    return undef unless defined $str && length $str;
+    my ($lo, $hi) = $str =~ /^\s*(0x[0-9a-fA-F]+|\d+)\s*-\s*(0x[0-9a-fA-F]+|\d+)\s*$/
+        or return undef;
+    my $min = $lo =~ /^0x/i ? hex($lo) : int($lo);
+    my $max = $hi =~ /^0x/i ? hex($hi) : int($hi);
+    return undef if $min > $max;   # reversed range is invalid -> fails closed
+    return [ $min, $max ];
+}
+
 # scan(%args) — read-only per-node LU-path / host-group report.
 #   client            (required) RestClient-like object
 #   wwns              arrayref of this node's FC WWNs (lowercase, no 0x)
