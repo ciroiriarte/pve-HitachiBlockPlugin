@@ -970,9 +970,12 @@ sub _request {
     if ($body) {
         my $json = encode_json($body);
         $req->content($json);
-        # bare API path for readable logs (drop the long base URL).
-        (my $logpath = $url) =~ s{^.*/v1/objects/}{/};
-        $self->_debug(3, "$method $logpath body=" . $self->_redact($json));
+        # Only build the (redacted) trace line when level 3 is active, so the
+        # common debug=0 path does no extra work per request.
+        if (($self->{debug} // 0) >= 3) {
+            (my $logpath = $url) =~ s{^.*/v1/objects/}{/};
+            $self->_debug(3, "$method $logpath body=" . $self->_redact($json));
+        }
     }
 
     my $res;
