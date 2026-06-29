@@ -117,9 +117,9 @@ Other details:
 
 ## LUN Scaling Strategy
 
-**Problem**: 1 LUN per virtual disk can create thousands of LUNs. SCSI hosts have practical limits (~2,048 LUNs per host group).
+**Problem**: 1 LUN per virtual disk can create thousands of LUNs. The binding ceilings are **LU paths per front-end port** (2,048 midrange / 4,096 high-end) and device/path count per host.
 
-**Solution**: Active-node-only LUN mapping.
+**Solution**: Active-node-only LUN mapping (**late binding**).
 
 - Each LUN is mapped **only to the host group of the node currently running the VM**
 - On VM migration: map LUN to target node first, then unmap from source after migration completes
@@ -127,14 +127,21 @@ Other details:
 - Example: 3,000 VMs across 10 nodes = ~300 LUNs per host, well within limits
 - **Multi-attach**: When a volume must be accessible from multiple nodes simultaneously (e.g., during live migration overlap or shared-disk clusters), `activate_volume` and `deactivate_volume` track concurrent mappings and only unmap the LUN when the last node deactivates it
 
+The full model — per-port LU-path/host-group caps, the per-node host-side ceiling,
+port-group sharding (the per-*port* lever), and a worked sizing example — is in
+[Capacity Planning & Scalability](capacity-planning.md).
+
 ## Control-Plane Session Scaling
 
-Each node holds **one persistent CM REST session per `hitachiblock` storage**, so session
-usage scales with cluster size and is bounded by the array's shared CM session cap. This is
-a scaling ceiling for large clusters (see `docs/operations.md` §"REST session limits"). The
-candidate topologies for decoupling session count from node count — ephemeral sessions with
-a cluster-wide lease budget, an active-active broker, and the rejected alternatives — are
-analysed in [ADR 0001 — Control-plane REST session scaling](adr/0001-control-plane-session-scaling.md).
+The plugin **defaults to session-less** CM REST auth (a transient session per request), so
+steady-state session use is bounded by in-flight requests rather than node count — within the
+array's shared **64-session** CM cap on large clusters. Setting `rest_keepalive 1` reverts to
+the legacy model of **one persistent session per worker process per node**, whose scaling
+ceiling and the candidate topologies for decoupling session count from node count (ephemeral
+leases, an active-active broker, the rejected alternatives) are analysed in
+[ADR 0001 — Control-plane REST session scaling](adr/0001-control-plane-session-scaling.md).
+See [Capacity Planning & Scalability](capacity-planning.md) for how this fits the overall
+sizing model.
 
 ## State Management
 

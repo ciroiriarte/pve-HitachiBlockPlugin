@@ -26,6 +26,10 @@ using the plugin against any real array.
 
 - **[Architecture](architecture.md)** — component design, module responsibilities,
   volume naming, state management, and per-operation data flows.
+- **[Capacity Planning & Scalability](capacity-planning.md)** — the per-port LU-path /
+  host-group caps, the per-node host-side ceiling, the late-binding and port-group-sharding
+  levers, why there is no VVols/Protocol-Endpoint equivalent on Linux, and a worked sizing
+  example. Measure live headroom with `hitachiblock-repl lun-paths`.
 - **[Vendor reference extracts](reference/)** — implementation-relevant Markdown
   distillations of the Hitachi PDFs (with page citations):
   - [`rest-api-extract.md`](reference/rest-api-extract.md) — Configuration Manager
