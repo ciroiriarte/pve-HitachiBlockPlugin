@@ -1,3 +1,16 @@
+pve-storage-hitachiblock (1.2.0~alpha38-1) stable; urgency=medium
+
+  * Fix `hitachiblock-repl pr-check` requiring --storeid (GitHub #2, follow-up to
+    alpha37). The host-side PR readiness diagnostic hit the global "storeid is
+    required" gate (and the array/credentials/RestClient setup) before dispatch,
+    so it printed usage instead of running. It is now dispatched early — before any
+    storeid/array setup — so `hitachiblock-repl pr-check` (and --json) runs
+    standalone on any node with no storeid and no array connection, as intended.
+    Found by live validation on the VSP E590H; the activate_volume validate-and-warn
+    path itself was already confirmed working live. 187/187 unit tests.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Mon, 29 Jun 2026 19:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha37-1) stable; urgency=medium
 
   * Opt-in SCSI-3 Persistent Reservation readiness for clustered/shared guest
