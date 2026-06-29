@@ -6,6 +6,18 @@ use warnings;
 use Test::More;
 
 use lib 'src';
+
+# Install the CORE::GLOBAL::glob override BEFORE the module is compiled so
+# that discover_wwid's internal glob('/sys/block/sd*/device/wwid') call is
+# interceptable on a per-test basis without touching production code.
+our $glob_override;
+BEGIN {
+    *CORE::GLOBAL::glob = sub {
+        return $glob_override->(@_) if defined $glob_override;
+        return CORE::glob($_[0]);
+    };
+}
+
 use PVE::Storage::HitachiBlock::Multipath;
 
 subtest 'constructor' => sub {
@@ -78,10 +90,72 @@ subtest 'discover_wwid' => sub {
     eval { $mp->discover_wwid() };
     like($@, qr/ldev_id is required/, 'discover_wwid requires ldev_id');
 
-    # On a host with no matching Hitachi device this returns undef rather than
-    # dying — the caller then falls back to the synthesized WWID.
-    my $res = $mp->discover_wwid(99999);
-    ok(!defined $res || $res =~ /^60060e80/, 'returns undef or a Hitachi NAA wwid');
+    # Drive the REAL discover_wwid against a faked sysfs: $glob_override feeds the
+    # /sys/block/sd*/device/wwid list and a local _read_first_line returns each
+    # file's contents. This exercises the page-83 prefix strip, the 60060e80
+    # Hitachi-OUI filter, the HITACHI vendor gate, the ldev-hex substring match
+    # and the dedup — every assertion can FAIL if that logic regresses.
+    my $run = sub {
+        my ($ldev, %fs) = @_;   # %fs: full sysfs path => file contents
+        no warnings 'redefine';
+        local $glob_override = sub {
+            return grep { m{/sys/block/sd\w+/device/wwid$} } sort keys %fs;
+        };
+        local *PVE::Storage::HitachiBlock::Multipath::_read_first_line = sub {
+            my ($path) = @_;
+            return exists $fs{$path} ? $fs{$path} : undef;
+        };
+        return $mp->discover_wwid($ldev);
+    };
+
+    # LDEV 262 -> hex 0106. A HITACHI device whose NAA-6 carries OUI + ldev hex;
+    # the 0x page-83 prefix must be stripped and the result lower-cased.
+    is($run->(262,
+        '/sys/block/sda/device/wwid'   => '0x60060E8000000000000000000106',
+        '/sys/block/sda/device/vendor' => 'HITACHI',
+    ), '60060e8000000000000000000106',
+       'matches OUI + ldev hex on a HITACHI device (0x stripped, lower-cased)');
+
+    # The naa. page-83 prefix is also stripped before matching.
+    is($run->(262,
+        '/sys/block/sda/device/wwid'   => 'naa.60060e8000000000000000000106',
+        '/sys/block/sda/device/vendor' => 'HITACHI',
+    ), '60060e8000000000000000000106',
+       'naa. prefix stripped before matching');
+
+    # Wrong OUI (not the Hitachi 60060e80) -> skipped even though it carries 0106.
+    is($run->(262,
+        '/sys/block/sda/device/wwid'   => '50060e8000000000000000000106',
+        '/sys/block/sda/device/vendor' => 'HITACHI',
+    ), undef, 'non-60060e80 OUI is skipped');
+
+    # Right OUI but a non-HITACHI vendor -> skipped.
+    is($run->(262,
+        '/sys/block/sda/device/wwid'   => '60060e8000000000000000000106',
+        '/sys/block/sda/device/vendor' => 'NETAPP',
+    ), undef, 'non-HITACHI vendor is skipped');
+
+    # Right device, but the ldev hex (0106) is absent -> no match.
+    is($run->(262,
+        '/sys/block/sda/device/wwid'   => '60060e8000000000000000009999',
+        '/sys/block/sda/device/vendor' => 'HITACHI',
+    ), undef, 'ldev hex not present -> no match');
+
+    # Two paths to the same LUN -> deduped to a single candidate.
+    is($run->(262,
+        '/sys/block/sda/device/wwid'   => '60060e8000000000000000000106',
+        '/sys/block/sda/device/vendor' => 'HITACHI',
+        '/sys/block/sdb/device/wwid'   => '60060e8000000000000000000106',
+        '/sys/block/sdb/device/vendor' => 'HITACHI',
+    ), '60060e8000000000000000000106',
+       'duplicate paths to the same wwid are deduped');
+
+    # An empty vendor file is allowed (the gate is "empty OR HITACHI").
+    is($run->(262,
+        '/sys/block/sda/device/wwid'   => '60060e8000000000000000000106',
+        '/sys/block/sda/device/vendor' => '',
+    ), '60060e8000000000000000000106',
+       'empty vendor string is accepted');
 };
 
 subtest 'whitelist_wwid' => sub {

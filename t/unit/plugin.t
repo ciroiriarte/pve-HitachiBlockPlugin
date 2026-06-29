@@ -1,158 +1,160 @@
 #!/usr/bin/perl
 
-# Plugin unit tests — tests that don't require PVE framework
-# Tests parse_volname, vmid_from_volname, _next_volname, volume_has_feature logic
+# Plugin unit tests.
+#
+# These exercise the REAL plugin subs (parse_volname, vmid_from_volname,
+# _alloc_size_mb, _ldev_size_mb, _ldev_range_cu_info, _ldev_in_range,
+# _select_ports, volume_has_feature, volume_import/export_formats,
+# _resolve_lock_timeout, status, _assert_snap_pool_supports_ti). The plugin
+# module can't be loaded without the PVE framework, so we stub the three PVE
+# modules it imports at compile time (base class + the two exporters), exactly
+# as t/unit/blockdev.t and t/unit/attributes.t do, then load the real plugin.
+#
+# A few subtests still assert plugin behaviour by reading the source (drift
+# alarms with no callable seam) or mirror an inline algorithm that can't be
+# extracted without a live array — those are clearly labelled below.
 
 use strict;
 use warnings;
 
 use Test::More;
-use File::Temp qw(tempdir);
-use POSIX qw(ceil);
+
+# ── Minimal PVE stubs so HitachiBlockPlugin.pm compiles standalone ──
+BEGIN {
+    $INC{'PVE/Storage/Plugin.pm'} = 1;
+    package PVE::Storage::Plugin;
+    sub api { 0 }                # overridden by the real plugin
+}
+BEGIN {
+    $INC{'PVE/JSONSchema.pm'} = 1;
+    package PVE::JSONSchema;
+    require Exporter;
+    our @ISA       = ('Exporter');
+    our @EXPORT_OK = ('get_standard_option');
+    sub get_standard_option { return {} }
+}
+BEGIN {
+    $INC{'PVE/Tools.pm'} = 1;
+    package PVE::Tools;
+    require Exporter;
+    our @ISA       = ('Exporter');
+    our @EXPORT_OK = ('run_command');
+    sub run_command { die "run_command stub should not be called in this test\n" }
+}
 
 use lib 'src';
+require_ok('PVE::Storage::Custom::HitachiBlockPlugin');
 
-# We can't load the full plugin without PVE libs, so test the helper functions
-# by extracting their logic. For integration, test on a PVE node.
+my $CLASS = 'PVE::Storage::Custom::HitachiBlockPlugin';
+
+# Tiny fake REST client: get_pool($id) returns a fixed pool hash (or undef), so
+# subs that go through $client->get_pool can be unit-tested without an array.
+{
+    package T::FakeClient;
+    sub new     { my ($c, $pool) = @_; bless { pool => $pool }, $c }
+    sub get_pool { return $_[0]->{pool} }
+}
 
 # ── Volume Name Parsing ──
 
 subtest 'parse_volname_valid' => sub {
-    # Simulate parse_volname logic
-    my $volname = 'vm-100-disk-1';
-    if ($volname =~ /^vm-(\d+)-disk-(\d+)$/) {
-        is($1, 100, 'vmid extracted');
-        is($2, 1, 'disk seq extracted');
-    } else {
-        fail('pattern should match');
-    }
+    my @r = $CLASS->parse_volname('vm-100-disk-1');
+    is($r[0], 'images', 'vtype is images');
+    is($r[1], 'vm-100-disk-1', 'name preserved');
+    is($r[2], 100, 'vmid extracted');
+    is($r[5], undef, 'isBase flag unset for a live volume');
+    is($r[6], 'raw', 'format is raw');
 };
 
 subtest 'parse_volname_invalid' => sub {
-    my $volname = 'invalid-name';
-    ok($volname !~ /^vm-(\d+)-disk-(\d+)$/, 'invalid name does not match');
+    eval { $CLASS->parse_volname('invalid-name') };
+    like($@, qr/unable to parse volume name/, 'invalid name dies');
 };
 
 subtest 'parse_volname_base' => sub {
-    # Base (template) volume parsing — added with create_base support.
-    my $parse = sub {
-        my ($v) = @_;
-        return ('images', $v, $1, undef, undef, 1, 'raw')
-            if $v =~ /^base-(\d+)-disk-(\d+)$/;
-        return ('images', $v, $1, undef, undef, undef, 'raw')
-            if $v =~ /^vm-(\d+)-disk-(\d+)$/;
-        return;
-    };
-
-    my @base = $parse->('base-100-disk-1');
+    my @base = $CLASS->parse_volname('base-100-disk-1');
     is($base[2], 100, 'base vmid extracted');
     is($base[5], 1, 'base isBase flag set');
 
-    my @vm = $parse->('vm-100-disk-1');
+    my @vm = $CLASS->parse_volname('vm-100-disk-1');
     is($vm[2], 100, 'vm vmid extracted');
     is($vm[5], undef, 'vm isBase flag unset');
 
-    # vmid_from_volname accepts both prefixes.
-    my $vmid_from = sub { ($_[0] =~ /^(?:vm|base)-(\d+)-/) ? $1 : 0 };
-    is($vmid_from->('base-200-disk-3'), 200, 'vmid from base name');
-    is($vmid_from->('vm-300-disk-1'), 300, 'vmid from vm name');
+    # vmid_from_volname accepts both prefixes (plain function, no $class arg).
+    is(PVE::Storage::Custom::HitachiBlockPlugin::vmid_from_volname('base-200-disk-3'),
+        200, 'vmid from base name');
+    is(PVE::Storage::Custom::HitachiBlockPlugin::vmid_from_volname('vm-300-disk-1'),
+        300, 'vmid from vm name');
 };
 
 subtest 'parse_volname_cloudinit' => sub {
-    # Faithful mirror of parse_volname, including the cloud-init branch (GitHub #6).
-    # PVE allocates a tiny raw LUN named vm-<vmid>-cloudinit; alloc_image must be able
-    # to create it AND parse/free must accept it, or the array LDEV leaks.
-    my $parse = sub {
-        my ($v) = @_;
-        return ('images', $v, $1, undef, undef, 1, 'raw')
-            if $v =~ /^base-(\d+)-disk-(\d+)$/;
-        return ('images', $v, $1, undef, undef, undef, 'raw')
-            if $v =~ /^vm-(\d+)-disk-(\d+)$/;
-        return ('images', $v, $1, undef, undef, undef, 'raw')
-            if $v =~ /^vm-(\d+)-cloudinit$/;
-        die "unable to parse volume name '$v'\n";
-    };
-
-    my @ci = $parse->('vm-9100-cloudinit');
+    # parse_volname must accept the cloud-init drive PVE allocates as a tiny raw
+    # LUN named vm-<vmid>-cloudinit, or the array LDEV leaks (GitHub #6).
+    my @ci = $CLASS->parse_volname('vm-9100-cloudinit');
     is($ci[0], 'images', 'cloudinit vtype is images');
     is($ci[1], 'vm-9100-cloudinit', 'cloudinit name preserved');
     is($ci[2], 9100, 'cloudinit vmid extracted');
     is($ci[5], undef, 'cloudinit isBase flag unset');
     is($ci[6], 'raw', 'cloudinit format is raw');
 
-    # vmid_from_volname / list_images evmid regex must also key off the cloudinit name.
-    my $vmid_from = sub { ($_[0] =~ /^(?:vm|base)-(\d+)-/) ? $1 : 0 };
-    is($vmid_from->('vm-9100-cloudinit'), 9100, 'vmid from cloudinit name');
+    # vmid_from_volname must also key off the cloudinit name.
+    is(PVE::Storage::Custom::HitachiBlockPlugin::vmid_from_volname('vm-9100-cloudinit'),
+        9100, 'vmid from cloudinit name');
 
     # Names that must still be rejected (no silent accept-anything).
-    eval { $parse->('vm-100-cloudinit-extra') };
-    ok($@, 'trailing junk after cloudinit rejected');
-    eval { $parse->('vm-cloudinit') };
-    ok($@, 'cloudinit without vmid rejected');
+    eval { $CLASS->parse_volname('vm-100-cloudinit-extra') };
+    like($@, qr/unable to parse volume name/, 'trailing junk after cloudinit rejected');
+    eval { $CLASS->parse_volname('vm-cloudinit') };
+    like($@, qr/unable to parse volume name/, 'cloudinit without vmid rejected');
+};
+
+subtest 'vmid_from_volname' => sub {
+    # Plain function (no $class): fully-qualified call so the volname is $_[0].
+    my $f = \&PVE::Storage::Custom::HitachiBlockPlugin::vmid_from_volname;
+    is($f->('vm-100-disk-1'), 100, 'vmid 100');
+    is($f->('vm-999-disk-5'), 999, 'vmid 999');
+    is($f->('invalid'), 0, 'no vmid');
 };
 
 subtest 'ldev_size_mb_logic' => sub {
-    # Mirrors _ldev_size_mb: prefer exact block count over formatted string.
-    my $size = sub {
-        my ($ldev) = @_;
-        for my $f (qw(blockCapacity numOfBlocks)) {
-            return int($ldev->{$f} * 512 / (1024 * 1024))
-                if defined $ldev->{$f} && $ldev->{$f} =~ /^\d+$/;
-        }
-        my $cap = $ldev->{byteFormatCapacity};
-        if (defined $cap) {
-            return int($1 * 1024 * 1024) if $cap =~ /^([\d.]+)\s*T/i;
-            return int($1 * 1024)        if $cap =~ /^([\d.]+)\s*G/i;
-            return int($1)               if $cap =~ /^([\d.]+)\s*M/i;
-        }
-        return 0;
-    };
-
-    is($size->({ blockCapacity => 2097152 }), 1024, '2097152 blocks = 1024 MB');
-    is($size->({ byteFormatCapacity => '1.00 G' }), 1024, '1G string = 1024 MB');
-    is($size->({ byteFormatCapacity => '2.00 T' }), 2097152, '2T string = 2097152 MB');
-    is($size->({ byteFormatCapacity => '512.00 M' }), 512, '512M string = 512 MB');
+    # _ldev_size_mb: prefer exact block count over the formatted string.
+    is($CLASS->_ldev_size_mb({ blockCapacity => 2097152 }), 1024,
+        '2097152 blocks = 1024 MB');
+    is($CLASS->_ldev_size_mb({ byteFormatCapacity => '1.00 G' }), 1024,
+        '1G string = 1024 MB');
+    is($CLASS->_ldev_size_mb({ byteFormatCapacity => '2.00 T' }), 2097152,
+        '2T string = 2097152 MB');
+    is($CLASS->_ldev_size_mb({ byteFormatCapacity => '512.00 M' }), 512,
+        '512M string = 512 MB');
     # Block count takes precedence over the formatted string when both present.
-    is($size->({ blockCapacity => 2097152, byteFormatCapacity => '999.00 G' }), 1024,
-       'block count wins over byteFormatCapacity');
+    is($CLASS->_ldev_size_mb({ blockCapacity => 2097152, byteFormatCapacity => '999.00 G' }),
+        1024, 'block count wins over byteFormatCapacity');
 };
 
 subtest 'ldev_range_cu_alignment' => sub {
-    # Mirrors _ldev_range_cu_info: an LDEV id is CU:LDEV, 256 ids per CU. A range
-    # is CU-aligned when it starts on a CU boundary and ends one id below one.
-    my $LDEVS_PER_CU = 256;
-    my $cu_info = sub {
-        my ($min, $max) = @_;
-        my $aligned = (($min % $LDEVS_PER_CU) == 0)
-            && ((($max + 1) % $LDEVS_PER_CU) == 0);
-        return ($aligned, int($min / $LDEVS_PER_CU), int($max / $LDEVS_PER_CU));
-    };
-    is_deeply([$cu_info->(0, 255)],    [1, 0, 0], '0-255 = whole CU 0 (aligned)');
-    is_deeply([$cu_info->(256, 511)],  [1, 1, 1], '256-511 = whole CU 1 (aligned)');
-    is_deeply([$cu_info->(256, 2303)], [1, 1, 8], '256-2303 = CU 1-8 (aligned)');
-    is((($cu_info->(300, 500))[0]), '', '300-500 is not CU-aligned');
-    is((($cu_info->(256, 510))[0]), '', '256-510 (ends mid-CU) is not aligned');
-    is((($cu_info->(1, 511))[0]),   '', '1-511 (starts mid-CU) is not aligned');
+    # _ldev_range_cu_info($min,$max) returns ($aligned, $first_cu, $last_cu);
+    # $aligned is a boolean (1 / '') from a && of two modulo checks.
+    is_deeply([$CLASS->_ldev_range_cu_info(0, 255)],    [1, 0, 0],
+        '0-255 = whole CU 0 (aligned)');
+    is_deeply([$CLASS->_ldev_range_cu_info(256, 511)],  [1, 1, 1],
+        '256-511 = whole CU 1 (aligned)');
+    is_deeply([$CLASS->_ldev_range_cu_info(256, 2303)], [1, 1, 8],
+        '256-2303 = CU 1-8 (aligned)');
+    is(($CLASS->_ldev_range_cu_info(300, 500))[0], '', '300-500 is not CU-aligned');
+    is(($CLASS->_ldev_range_cu_info(256, 510))[0], '', '256-510 (ends mid-CU) is not aligned');
+    is(($CLASS->_ldev_range_cu_info(1, 511))[0],   '', '1-511 (starts mid-CU) is not aligned');
 };
 
 subtest 'alloc_size_mb_floor' => sub {
-    # Mirrors _alloc_size_mb: KiB -> MiB (round up), floored to the array minimum.
-    # The E590H rejects DP-VOLs <= 46 MiB ("capacity is invalid."); keep this in
-    # sync with $MIN_LDEV_MB in the plugin.
-    my $MIN_LDEV_MB = 48;
-    my $alloc_mb = sub {
-        my ($kib) = @_;
-        my $mb = POSIX::ceil(($kib || 0) / 1024);
-        $mb = $MIN_LDEV_MB if $mb < $MIN_LDEV_MB;
-        return $mb;
-    };
-    is($alloc_mb->(4096), 48,   'PVE vTPM (4 MiB) floored to the array minimum');
-    is($alloc_mb->(528),  48,   'sub-MiB EFI vars floored to the array minimum');
-    is($alloc_mb->(0),    48,   'zero/undef floored to the array minimum');
-    is($alloc_mb->(48 * 1024), 48,      '48 MiB stays 48 (at the floor)');
-    is($alloc_mb->(49 * 1024), 49,      '49 MiB passes through exactly (no rounding up)');
-    is($alloc_mb->(8 * 1024 * 1024), 8192, '8 GiB passes through exactly');
-    is($alloc_mb->(100 * 1024 + 512), 101, 'non-MiB-aligned size above floor rounds up to whole MiB');
+    # _alloc_size_mb: KiB -> MiB (round up), floored to the array minimum
+    # ($MIN_LDEV_MB = 48; the E590H rejects DP-VOLs <= 46 MiB).
+    is($CLASS->_alloc_size_mb(4096), 48,   'PVE vTPM (4 MiB) floored to the array minimum');
+    is($CLASS->_alloc_size_mb(528),  48,   'sub-MiB EFI vars floored to the array minimum');
+    is($CLASS->_alloc_size_mb(0),    48,   'zero/undef floored to the array minimum');
+    is($CLASS->_alloc_size_mb(48 * 1024), 48,      '48 MiB stays 48 (at the floor)');
+    is($CLASS->_alloc_size_mb(49 * 1024), 49,      '49 MiB passes through exactly (no rounding up)');
+    is($CLASS->_alloc_size_mb(8 * 1024 * 1024), 8192, '8 GiB passes through exactly');
+    is($CLASS->_alloc_size_mb(100 * 1024 + 512), 101, 'non-MiB-aligned size above floor rounds up to whole MiB');
 };
 
 subtest 'plugindata_content_types' => sub {
@@ -209,92 +211,79 @@ subtest 'no_duplicate_pve_common_properties' => sub {
 };
 
 subtest 'ldev_range_fence' => sub {
-    # Mirrors _ldev_in_range: destructive ops (unmap/delete) must refuse any LDEV
-    # outside the configured ldev_range. This is the backstop that would have
-    # prevented unmapping production LDEV 27 while it shares a port with our range.
-    my $in_range = sub {
-        my ($range, $id) = @_;
-        return 1 unless defined $range && length $range;
-        return 0 unless defined $id;
-        my ($min, $max);
-        if ($range =~ /^(0x[0-9a-f]+)-(0x[0-9a-f]+)$/i) { $min = hex($1); $max = hex($2); }
-        elsif ($range =~ /^(\d+)-(\d+)$/)               { $min = int($1); $max = int($2); }
-        else { die "bad range\n"; }
-        return ($id >= $min && $id <= $max) ? 1 : 0;
-    };
-    ok($in_range->('256-511', 256), 'min boundary in range');
-    ok($in_range->('256-511', 511), 'max boundary in range');
-    ok($in_range->('256-511', 300), 'middle in range');
-    ok(!$in_range->('256-511', 255), 'just below excluded');
-    ok(!$in_range->('256-511', 512), 'just above excluded');
-    ok(!$in_range->('256-511', 27),  'production LDEV 27 excluded (the incident)');
-    ok($in_range->('0x100-0x1ff', 256),   'hex range min');
-    ok(!$in_range->('0x100-0x1ff', 0x200),'hex range above excluded');
-    ok($in_range->(undef, 27), 'no range configured => no fence');
+    # _ldev_in_range($scfg,$ldev_id): destructive ops (unmap/delete) must refuse
+    # any LDEV outside the configured ldev_range. This is the backstop that would
+    # have prevented unmapping production LDEV 27 while it shares a port with our
+    # range. Also folds in ldev_range_parsing (decimal + hex range forms).
+    ok($CLASS->_ldev_in_range({ ldev_range => '256-511' }, 256), 'min boundary in range');
+    ok($CLASS->_ldev_in_range({ ldev_range => '256-511' }, 511), 'max boundary in range');
+    ok($CLASS->_ldev_in_range({ ldev_range => '256-511' }, 300), 'middle in range');
+    ok(!$CLASS->_ldev_in_range({ ldev_range => '256-511' }, 255), 'just below excluded');
+    ok(!$CLASS->_ldev_in_range({ ldev_range => '256-511' }, 512), 'just above excluded');
+    ok(!$CLASS->_ldev_in_range({ ldev_range => '256-511' }, 27),
+        'production LDEV 27 excluded (the incident)');
+
+    # Hex range form is parsed the same as decimal (folds in ldev_range_parsing).
+    ok($CLASS->_ldev_in_range({ ldev_range => '0x100-0x1ff' }, 256), 'hex range min');
+    ok(!$CLASS->_ldev_in_range({ ldev_range => '0x100-0x1ff' }, 0x200),
+        'hex range above excluded');
+    ok($CLASS->_ldev_in_range({ ldev_range => '1000-1999' }, 1000), 'decimal range min');
+    ok($CLASS->_ldev_in_range({ ldev_range => '1000-1999' }, 1999), 'decimal range max');
+
+    # No range configured => no fence (always in range).
+    ok($CLASS->_ldev_in_range({}, 27), 'no range configured => no fence');
+
+    # A malformed range dies rather than silently accepting.
+    eval { $CLASS->_ldev_in_range({ ldev_range => 'invalid' }, 27) };
+    like($@, qr/Invalid ldev_range/, 'malformed range rejected');
 };
 
 subtest 'status_pool_used_logic' => sub {
-    # Mirrors status(): derive used/free (bytes) from a pool object whose MB
-    # fields may or may not include usedPoolCapacity. Confirmed on a VSP E590H
-    # that usedPoolCapacity is null while availableVolumeCapacity is populated.
+    # status() derives ($total,$free,$used) from the pool object get_pool returns.
+    # Drive it through a fake _client so no array is needed. Confirmed on a VSP
+    # E590H that usedPoolCapacity is null while availableVolumeCapacity is set.
     my $mb = 1024 * 1024;
-    my $derive = sub {
-        my ($pool) = @_;
-        my $total = ($pool->{totalPoolCapacity} || 0) * $mb;
-        my $used;
-        if (defined $pool->{usedPoolCapacity}) {
-            $used = $pool->{usedPoolCapacity} * $mb;
-        } elsif (defined $pool->{availableVolumeCapacity}) {
-            $used = $total - $pool->{availableVolumeCapacity} * $mb;
-        } elsif (defined $pool->{usedCapacityRate}) {
-            $used = int($total * $pool->{usedCapacityRate} / 100);
-        } else {
-            $used = 0;
-        }
-        $used = 0      if $used < 0;
-        $used = $total if $used > $total;
-        my $free = $total - $used;
-        $free = 0 if $free < 0;
-        return ($total, $free, $used);
+    my $scfg = { pool_id => 1 };
+    my $fake_pool;
+    no warnings 'redefine';
+    local *PVE::Storage::Custom::HitachiBlockPlugin::_client = sub {
+        return T::FakeClient->new($fake_pool);
     };
 
     # 1. usedPoolCapacity present -> used directly from it.
-    my @r = $derive->({ totalPoolCapacity => 10240, usedPoolCapacity => 2048 });
-    is($r[0], 10240 * $mb, 'total');
-    is($r[2], 2048 * $mb,  'used from usedPoolCapacity');
-    is($r[1], 8192 * $mb,  'free = total - used');
+    $fake_pool = { totalPoolCapacity => 10240, usedPoolCapacity => 2048 };
+    my ($total, $free, $used) = $CLASS->status('store', $scfg, {});
+    is($total, 10240 * $mb, 'total');
+    is($used,  2048 * $mb,  'used from usedPoolCapacity');
+    is($free,  8192 * $mb,  'free = total - used');
 
     # 2. E590H case: usedPoolCapacity null -> derive from availableVolumeCapacity.
-    @r = $derive->({ totalPoolCapacity => 22210482, usedPoolCapacity => undef,
-                     availableVolumeCapacity => 21576282, usedCapacityRate => 2 });
-    is($r[2], (22210482 - 21576282) * $mb, 'used = total - availableVolumeCapacity');
-    is($r[1], 21576282 * $mb, 'free = availableVolumeCapacity');
-    ok($r[2] > 0, 'pool is NOT reported as 0%-used (the bug this guards)');
+    $fake_pool = { totalPoolCapacity => 22210482, usedPoolCapacity => undef,
+                   availableVolumeCapacity => 21576282, usedCapacityRate => 2 };
+    ($total, $free, $used) = $CLASS->status('store', $scfg, {});
+    is($used, (22210482 - 21576282) * $mb, 'used = total - availableVolumeCapacity');
+    is($free, 21576282 * $mb, 'free = availableVolumeCapacity');
+    ok($used > 0, 'pool is NOT reported as 0%-used (the bug this guards)');
 
     # 3. last resort: only usedCapacityRate present.
-    @r = $derive->({ totalPoolCapacity => 1000, usedCapacityRate => 25 });
-    is($r[2], int(1000 * $mb * 25 / 100), 'used from usedCapacityRate');
+    $fake_pool = { totalPoolCapacity => 1000, usedCapacityRate => 25 };
+    ($total, $free, $used) = $CLASS->status('store', $scfg, {});
+    is($used, int(1000 * $mb * 25 / 100), 'used from usedCapacityRate');
 
     # clamp: nonsense available > total must not yield negative used.
-    @r = $derive->({ totalPoolCapacity => 100, availableVolumeCapacity => 999 });
-    is($r[2], 0, 'used clamped to >= 0');
-    is($r[1], 100 * $mb, 'free clamped to total');
+    $fake_pool = { totalPoolCapacity => 100, availableVolumeCapacity => 999 };
+    ($total, $free, $used) = $CLASS->status('store', $scfg, {});
+    is($used, 0, 'used clamped to >= 0');
+    is($free, 100 * $mb, 'free clamped to total');
 };
 
-subtest 'vmid_from_volname' => sub {
-    my $extract = sub {
-        my ($v) = @_;
-        return ($v =~ /^vm-(\d+)-/) ? $1 : 0;
-    };
-
-    is($extract->('vm-100-disk-1'), 100, 'vmid 100');
-    is($extract->('vm-999-disk-5'), 999, 'vmid 999');
-    is($extract->('invalid'), 0, 'no vmid');
-};
-
-# ── Next Volume Name Generation ──
+# ── Next Volume Name Generation (DOCUMENTED MIRROR) ──
 
 subtest 'next_volname_logic' => sub {
+    # DOCUMENTED DEFERRAL: there is no _next_volname/find_free_volname seam — the
+    # next-name logic lives inline in alloc_image/manage_volume and needs a live
+    # registry/array to exercise. This subtest asserts the Perl idiom only; it is
+    # not a call into the real sub. (Kept as a low-value drift note.)
     my %registry = (
         'vm-100-disk-1' => { ldev_id => 1 },
         'vm-100-disk-2' => { ldev_id => 2 },
@@ -337,96 +326,57 @@ subtest 'next_volname_logic' => sub {
 # ── Feature Matrix ──
 
 subtest 'volume_has_feature_logic' => sub {
-    # Mirrors volume_has_feature: keyed by base/current/snap (LVM-thin model).
-    my $features = {
-        snapshot   => { current => 1 },
-        clone      => { base => 1, snap => 1 },
-        copy       => { base => 1, current => 1, snap => 1 },
-        sparseinit => { base => 1, current => 1 },
-        template   => { current => 1 },
-        rename     => { current => 1 },
-        resize     => { current => 1 },
-    };
-
-    my $check = sub {
-        my ($feature, $isBase, $snapname) = @_;
-        my $key = $snapname ? 'snap' : ($isBase ? 'base' : 'current');
-        return ($features->{$feature} && $features->{$feature}{$key}) ? 1 : 0;
+    # volume_has_feature parses $volname internally to decide base/current/snap,
+    # so drive base with 'base-100-disk-1', current with 'vm-100-disk-1', and a
+    # snapshot by passing $snapname. Returns 1 (offered) or undef (not offered).
+    my $scfg = {};
+    my $has = sub {
+        my ($feature, $volname, $snapname) = @_;
+        return $CLASS->volume_has_feature($scfg, $feature, 'store', $volname, $snapname, 0);
     };
 
     # Linked clones are CoW: offered only from a base image or a snapshot.
-    is($check->('clone', 0, undef),   0, 'no linked clone of a live volume');
-    is($check->('clone', 1, undef),   1, 'linked clone of a base image');
-    is($check->('clone', 0, 'snap1'), 1, 'linked clone from a snapshot');
+    is($has->('clone', 'vm-100-disk-1', undef),    undef, 'no linked clone of a live volume');
+    is($has->('clone', 'base-100-disk-1', undef),  1,     'linked clone of a base image');
+    is($has->('clone', 'vm-100-disk-1', 'snap1'),  1,     'linked clone from a snapshot');
 
-    is($check->('snapshot', 0, undef),   1, 'snapshot a live volume');
-    is($check->('snapshot', 0, 'snap1'), 0, 'no snapshot of a snapshot');
+    is($has->('snapshot', 'vm-100-disk-1', undef),   1,     'snapshot a live volume');
+    is($has->('snapshot', 'vm-100-disk-1', 'snap1'), undef, 'no snapshot of a snapshot');
 
-    is($check->('template', 0, undef), 1, 'template from a live volume');
-    is($check->('rename',   0, undef), 1, 'rename a live volume');
-    is($check->('resize',   0, undef), 1, 'resize a live volume');
-    is($check->('resize', 0, 'snap1'), 0, 'no resize of a snapshot');
+    is($has->('template', 'vm-100-disk-1', undef), 1, 'template from a live volume');
+    is($has->('rename',   'vm-100-disk-1', undef), 1, 'rename a live volume');
+    is($has->('resize',   'vm-100-disk-1', undef), 1, 'resize a live volume');
+    is($has->('resize',   'vm-100-disk-1', 'snap1'), undef, 'no resize of a snapshot');
 
-    is($check->('copy', 0, undef), 1, 'copy a live volume');
-    is($check->('copy', 1, undef), 1, 'copy a base image');
+    is($has->('copy', 'vm-100-disk-1', undef),   1, 'copy a live volume');
+    is($has->('copy', 'base-100-disk-1', undef), 1, 'copy a base image');
 
-    is($check->('unknown', 0, undef), 0, 'unknown feature');
-};
-
-# ── LDEV Range Parsing ──
-
-subtest 'ldev_range_parsing' => sub {
-    # Decimal range
-    my $range = '1000-1999';
-    if ($range =~ /^(\d+)-(\d+)$/) {
-        is($1, 1000, 'decimal min');
-        is($2, 1999, 'decimal max');
-    } else {
-        fail('should match decimal');
-    }
-
-    # Hex range
-    $range = '0x3E8-0x7CF';
-    if ($range =~ /^(0x[0-9a-f]+)-(0x[0-9a-f]+)$/i) {
-        is(hex($1), 1000, 'hex min');
-        is(hex($2), 1999, 'hex max');
-    } else {
-        fail('should match hex');
-    }
-
-    # Invalid range
-    $range = 'invalid';
-    ok($range !~ /^(0x[0-9a-fA-F]+|\d+)-(0x[0-9a-fA-F]+|\d+)$/, 'invalid range rejected');
+    is($has->('unknown', 'vm-100-disk-1', undef), undef, 'unknown feature');
 };
 
 # ── Port Scheduler Logic ──
 
 subtest 'port_scheduler_deterministic_by_ldev' => sub {
-    # Mirrors _select_ports: a given LDEV always maps to the same two ports
-    # (stable across processes/nodes), giving multipath redundancy without an
-    # in-memory counter that resets every pvesm invocation.
-    my @all_ports = ('CL1-A', 'CL2-A', 'CL3-A', 'CL4-A');
+    # _select_ports: with port_scheduler enabled and >2 ports, a given LDEV always
+    # maps to the same two ports (stable across processes/nodes), giving multipath
+    # redundancy without an in-memory counter that resets every pvesm invocation.
+    my $scfg = { target_ports => 'CL1-A,CL2-A,CL3-A,CL4-A', port_scheduler => 1 };
+    my $select = sub { [ $CLASS->_select_ports('store', $scfg, $_[0]) ] };
 
-    my $select = sub {
-        my ($ldev_id) = @_;
-        my $n = scalar(@all_ports);
-        my $idx = defined $ldev_id ? ($ldev_id % $n) : 0;
-        my $next = ($idx + 1) % $n;
-        return ($all_ports[$idx], $all_ports[$next]);
-    };
-
-    is_deeply([$select->(0)], ['CL1-A', 'CL2-A'], 'ldev 0 -> ports 0,1');
-    is_deeply([$select->(1)], ['CL2-A', 'CL3-A'], 'ldev 1 -> ports 1,2');
-    is_deeply([$select->(3)], ['CL4-A', 'CL1-A'], 'ldev 3 -> ports 3,0 (wraps)');
+    is_deeply($select->(0), ['CL1-A', 'CL2-A'], 'ldev 0 -> ports 0,1');
+    is_deeply($select->(1), ['CL2-A', 'CL3-A'], 'ldev 1 -> ports 1,2');
+    is_deeply($select->(3), ['CL4-A', 'CL1-A'], 'ldev 3 -> ports 3,0 (wraps)');
 
     # Same LDEV is stable across repeated calls (map/unmap symmetry).
-    is_deeply([$select->(42)], [$select->(42)], 'selection is stable per LDEV');
+    is_deeply($select->(42), $select->(42), 'selection is stable per LDEV');
 };
 
-# ── Manage/Unmanage Volume Name Logic ──
+# ── Manage/Unmanage Volume Name Logic (DOCUMENTED MIRROR) ──
 
 subtest 'manage_generates_volname' => sub {
-    # When managing an existing LDEV, a new volname is generated
+    # DOCUMENTED DEFERRAL: like next_volname_logic, the managed-LDEV naming lives
+    # inline in manage_volume with no extractable seam (needs a live array). This
+    # asserts the Perl idiom only, not a real sub call.
     my %registry = (
         'vm-100-disk-1' => { ldev_id => 1 },
         'vm-100-disk-2' => { ldev_id => 2 },
@@ -446,20 +396,23 @@ subtest 'manage_generates_volname' => sub {
 # ── Volume Export/Import Format Gating ──
 
 subtest 'volume_import_formats_logic' => sub {
-    # Mirrors volume_import_formats / volume_export_formats: only a non-snapshot,
+    # volume_import_formats / volume_export_formats: only a non-snapshot,
     # non-incremental raw stream is offered (array snapshots are not streamed).
-    my $formats = sub {
-        my (%o) = @_;
-        return () if $o{with_snapshots};
-        return () if defined($o{base_snapshot});
-        return () if defined($o{snapshot});
-        return ('raw+size');
-    };
+    my $scfg = {};
+    my $vol  = 'vm-100-disk-1';
 
-    is_deeply([$formats->()], ['raw+size'], 'plain volume offers raw+size');
-    is_deeply([$formats->(with_snapshots => 1)], [], 'no stream with snapshots');
-    is_deeply([$formats->(base_snapshot => 'b')], [], 'no incremental stream');
-    is_deeply([$formats->(snapshot => 's')], [], 'no snapshot-specific stream');
+    is_deeply([$CLASS->volume_import_formats($scfg, 'store', $vol, undef, undef, undef)],
+        ['raw+size'], 'plain volume offers raw+size');
+    is_deeply([$CLASS->volume_import_formats($scfg, 'store', $vol, undef, undef, 1)],
+        [], 'no stream with snapshots');
+    is_deeply([$CLASS->volume_import_formats($scfg, 'store', $vol, undef, 'b', undef)],
+        [], 'no incremental stream');
+    is_deeply([$CLASS->volume_import_formats($scfg, 'store', $vol, 's', undef, undef)],
+        [], 'no snapshot-specific stream');
+
+    # volume_export_formats delegates to volume_import_formats (same gating).
+    is_deeply([$CLASS->volume_export_formats($scfg, 'store', $vol, undef, undef, undef)],
+        ['raw+size'], 'export_formats matches import_formats for a plain volume');
 };
 
 subtest 'volume_export_streams_whole_device' => sub {
@@ -486,25 +439,31 @@ subtest 'volume_export_streams_whole_device' => sub {
 
 # ── snap_pool Thin Image capability validation (#21) ──
 
-# Replicate the bad-pool decision in _assert_snap_pool_supports_ti so the
-# classification is covered without loading the full plugin (needs PVE libs).
 subtest 'snap_pool_ti_capability_logic' => sub {
-    my $is_bad = sub {
+    # _assert_snap_pool_supports_ti($storeid,$scfg,$client) dies on an
+    # HDT/multi-tier/data-direct-mapping/mainframe snap pool and returns quietly
+    # otherwise (and quietly if get_pool returns undef). Drive it with a fake
+    # client whose get_pool returns the pool under test.
+    my $scfg = { snap_pool_id => 7 };
+    my $assert = sub {
         my ($pool) = @_;
-        my $type = $pool->{poolType} // '';
-        return 1 if $type eq 'HDT';
-        return 1 if ref $pool->{tiers} eq 'ARRAY' && @{ $pool->{tiers} } > 1;
-        return 1 if $pool->{dataDirectMappingEnabled};
-        return 1 if $pool->{isMainframe};
-        return 0;
+        my $client = T::FakeClient->new($pool);
+        eval { $CLASS->_assert_snap_pool_supports_ti('store', $scfg, $client) };
+        return $@;
     };
 
-    ok($is_bad->({ poolType => 'HDT', tiers => [ {}, {} ] }), 'HDT multi-tier pool rejected');
-    ok($is_bad->({ poolType => 'HDP', tiers => [ {}, {} ] }), 'multi-tier pool rejected even if type not HDT');
-    ok($is_bad->({ poolType => 'HDP', dataDirectMappingEnabled => 1 }), 'data-direct-mapping pool rejected');
-    ok($is_bad->({ poolType => 'HDP', isMainframe => 1 }), 'mainframe pool rejected');
-    ok(!$is_bad->({ poolType => 'HDP' }), 'plain single-tier HDP pool accepted');
-    ok(!$is_bad->({ poolType => 'HDP', tiers => [ {} ] }), 'single-tier HDP (one tier) accepted');
+    like($assert->({ poolType => 'HDT', tiers => [ {}, {} ] }), qr/single-tier HDP/,
+        'HDT multi-tier pool rejected');
+    like($assert->({ poolType => 'HDP', tiers => [ {}, {} ] }), qr/single-tier HDP/,
+        'multi-tier pool rejected even if type not HDT');
+    like($assert->({ poolType => 'HDP', dataDirectMappingEnabled => 1 }), qr/single-tier HDP/,
+        'data-direct-mapping pool rejected');
+    like($assert->({ poolType => 'HDP', isMainframe => 1 }), qr/single-tier HDP/,
+        'mainframe pool rejected');
+    is($assert->({ poolType => 'HDP' }), '', 'plain single-tier HDP pool accepted');
+    is($assert->({ poolType => 'HDP', tiers => [ {} ] }), '',
+        'single-tier HDP (one tier) accepted');
+    is($assert->(undef), '', 'unreadable pool (get_pool undef) does not block the op');
 };
 
 # The validation must run at every Thin Image entry point so the array's cryptic
@@ -528,20 +487,12 @@ subtest 'snap_pool_validation_call_sites' => sub {
 
 # ── Cluster-lock timeout override (#10) ──
 
-# Replicate _resolve_lock_timeout precedence (caller > configured > default)
-# without loading the PVE cluster stack.
 subtest 'lock_timeout_resolution_logic' => sub {
-    my $DEFAULT = 120;
-    my $resolve = sub {
-        my ($caller, $configured) = @_;
-        return $caller     if defined $caller;
-        return $configured if defined $configured;
-        return $DEFAULT;
-    };
-    is($resolve->(30, 90),    30,  'explicit caller timeout wins');
-    is($resolve->(undef, 90), 90,  'configured lock_timeout used when caller is undef');
-    is($resolve->(undef, undef), 120, 'falls back to the default when neither is set');
-    is($resolve->(0, 90),     0,   'an explicit 0 (no wait) is honoured, not overridden');
+    # _resolve_lock_timeout precedence: caller > configured > default (120).
+    is($CLASS->_resolve_lock_timeout(30, 90),    30,  'explicit caller timeout wins');
+    is($CLASS->_resolve_lock_timeout(undef, 90), 90,  'configured lock_timeout used when caller is undef');
+    is($CLASS->_resolve_lock_timeout(undef, undef), 120, 'falls back to the default when neither is set');
+    is($CLASS->_resolve_lock_timeout(0, 90),     0,   'an explicit 0 (no wait) is honoured, not overridden');
 };
 
 subtest 'cluster_lock_storage_override' => sub {

@@ -14,28 +14,47 @@ use lib 'src';
 # The module must compile and load under taint mode.
 require_ok('PVE::Storage::HitachiBlock::Multipath');
 
-# Mirror of _run_cmd's argv untaint: internal command names, flags, device paths
-# and WWIDs are allowed; shell metacharacters / spaces are rejected.
-my $untaint_arg = sub {
-    my ($a) = @_;
-    return $a =~ /^([\w\@%+=:,.\/-]+)$/ ? $1 : undef;
-};
-for my $ok ('multipath', '-r', '--getsize64', '/dev/mapper/360060e8021a789005060a78900000100',
-            '360060e8021a789005060a78900000100', 'resize', 'map', '--timeout=10') {
-    ok(defined $untaint_arg->($ok), "argv accepts '$ok'");
-}
+# Exercise the REAL argv untaint in _run_cmd (not a local copy of its regex):
+# internal command names, flags, device paths and WWIDs are accepted; shell
+# metacharacters / spaces croak BEFORE any exec. Calling the real sub means this
+# fails if the allowed charset ever drifts.
+my $run_cmd = \&PVE::Storage::HitachiBlock::Multipath::_run_cmd;
+
+# Accept: a device path argument survives untaint and is exec'd (echo is on
+# _run_cmd's hardened PATH); the echoed output proves the arg was accepted.
+my $devpath = '/dev/mapper/360060e8021a789005060a78900000100';
+is($run_cmd->('echo', $devpath), "$devpath\n",
+   'argv untaint accepts a device path (real _run_cmd execs echo)');
+# `true` ignores its args and exits 0 — no croak means a flag and a bare wwid
+# both passed untaint.
+is($run_cmd->('true', '--getsize64', '360060e8021a789005060a78900000100'), '',
+   'argv untaint accepts a flag and a bare wwid (real _run_cmd)');
+
+# Reject: unsafe arguments croak before exec.
 for my $bad ('foo; rm -rf /', 'a b', '$(whoami)', 'x|y', "a\nb") {
-    ok(!defined $untaint_arg->($bad), "argv rejects unsafe '$bad'");
+    eval { $run_cmd->('echo', $bad) };
+    like($@, qr/refusing to exec invalid\/tainted argument/,
+         "argv untaint rejects unsafe '$bad' (real _run_cmd)");
 }
 
-# Mirror of the sysfs scan-path untaint (rescan_scsi_hosts): only the expected
-# /sys/class/scsi_host/hostN shape is accepted from a tainted glob().
-my $untaint_host = sub {
-    my ($p) = @_;
-    return $p =~ m{^(/sys/class/scsi_host/host\d+)\z} ? $1 : undef;
+# Exercise the REAL host-number untaint in rescan_scsi_targeted: a non-numeric
+# host croaks before any sysfs write. (rescan_scsi_hosts' glob-path untaint
+# cannot be driven without a udevadm exec side-effect, so its pattern is covered
+# by a source drift-alarm below rather than a re-encoded regex.)
+my $mp_taint = PVE::Storage::HitachiBlock::Multipath->new();
+eval { $mp_taint->rescan_scsi_targeted('bad:0:0:5') };
+like($@, qr/invalid host in hctl/, 'rescan_scsi_targeted untaints the host number (real)');
+
+# Drift alarm (tracks the real source, not a copy of its logic): rescan_scsi_hosts
+# must keep untainting the tainted glob() path against the exact sysfs host shape.
+my $mp_src = do {
+    local $/;
+    open my $fh, '<', 'src/PVE/Storage/HitachiBlock/Multipath.pm'
+        or die "open Multipath.pm: $!";
+    <$fh>;
 };
-ok(defined $untaint_host->('/sys/class/scsi_host/host18'), 'scan path accepts a real host');
-ok(!defined $untaint_host->('/sys/class/scsi_host/host18/../../../etc'), 'scan path rejects traversal');
+like($mp_src, qr{scsi_host/host\\d\+\)\\z},
+     'rescan_scsi_hosts untaints the glob path to the /sys/class/scsi_host/hostN shape');
 
 # Functional: get_device_path must return an UNTAINTED path, since PVE runs
 # mkfs/mount on it via exec under taint mode (found live: CT mkfs.ext4 died
