@@ -26,6 +26,10 @@ to paste into an issue — **credentials are never emitted** (the password is ne
   orphans*), over the configured `ldev_range`.
 - **Host device state on this node** — for each registered volume, the resolved
   `/dev/mapper/<wwid>` path and whether it is present and a block device.
+- **LU-path / host-group counts (this node)** — per target port: LU-path count and
+  host-groups-on-port (headroom vs the array caps), total mapped LU paths, and any
+  orphan LU paths. See *LU-path / Host-group Accounting* below for the dedicated
+  `lun-paths` / `reconcile-maps` commands.
 
 Run it on the node exhibiting the problem (device state is per-node). If the endpoint
 is down, the bundle is still produced and the REST section reports the failure.
@@ -231,6 +235,45 @@ Detects:
 Removes registry entries that reference non-existent array LDEVs. This is useful after manual array-side operations or recovery from failures.
 
 **Note**: Array orphans (LDEVs without registry entries) are not automatically deleted to prevent data loss. They should be reviewed and handled manually.
+
+## LU-path / Host-group Accounting and Orphan-map Reconcile
+
+Late binding maps a LUN only on the node currently running the VM and unmaps on
+stop/migrate, which keeps each node's host-side device count and per-port LU-path
+consumption bounded (≈ running-VM disks per node). These commands make that
+**observable** and let you reclaim leaked mappings.
+
+### Report LU-path headroom
+
+```bash
+hitachiblock-repl lun-paths --storeid <storeid>
+hitachiblock-repl lun-paths --storeid <storeid> --json
+hitachiblock-repl lun-paths --storeid <storeid> --lun-path-budget 4096
+```
+
+Read-only. For **this node's** host group on each target port it reports the
+LU-path count (with headroom against the per-FE-port LU-path budget, default 2048,
+override with `--lun-path-budget`), the number of host groups on the port (against
+the fixed 255/port cap), the total mapped LU paths on this node, and any **orphan
+LU paths** — paths mapped in this node's host group whose LDEV is no longer in the
+registry (the signature of a leaked unmap: failed teardown, crash mid-migration, or
+the unmap-retry loop giving up). A soft warning fires when a port crosses 80% of its
+LU-path budget. The same counts also appear in the `diagnostics` bundle.
+
+### Reconcile (unmap) orphan LU paths
+
+```bash
+hitachiblock-repl reconcile-maps --storeid <storeid>            # DRY-RUN (default)
+hitachiblock-repl reconcile-maps --storeid <storeid> --apply    # actually unmap
+```
+
+Unmaps **only** orphan LU paths — those in **this node's** host groups whose LDEV
+is absent from the registry **and** within the configured `ldev_range`. A live
+registered volume is never a candidate, and out-of-range LDEVs are skipped with a
+reason, so a running VM's I/O is never cut. It is **dry-run by default** (lists what
+it would unmap); pass `--apply` to act. This is an explicit operator action — it is
+intentionally **not** run automatically on `deactivate_storage` (a routine operation
+that could race concurrent activations on the same node).
 
 ---
 

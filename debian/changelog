@@ -1,3 +1,24 @@
+pve-storage-hitachiblock (1.2.0~alpha33-1) stable; urgency=medium
+
+  * Surface per-node LU-path / host-group counts and add a guarded orphan-map
+    reconcile pass (GitHub #28). New module PVE::Storage::HitachiBlock::LunPaths:
+    scan() reports, for this node's host group on each target port, the LU-path
+    count (headroom vs the per-FE-port budget, default 2048), host-groups-on-port
+    (vs the 255/port cap), the total mapped LU paths on the node, any orphan LU
+    paths (mapped here but whose LDEV is no longer in the registry — the signature
+    of a leaked unmap), and a soft over-budget warning at 80%. reconcile() unmaps
+    ONLY those orphans and ONLY within ldev_range — never a registered/live volume,
+    out-of-range LDEVs are skipped with a reason — and is dry-run by default.
+    hitachiblock-repl gains `lun-paths` (read-only report, --json,
+    --lun-path-budget) and `reconcile-maps` (dry-run unless --apply); the
+    diagnostics bundle gains an LU-path/host-group section. Reconcile is an explicit
+    operator action, intentionally not auto-run on deactivate_storage. Makes the
+    scalability story falsifiable and alerts before a silent per-port budget breach.
+    New t/unit/lunpaths.t (scan counts/orphans/budget; reconcile dry-run/apply/
+    out-of-range/failure). 186/186 unit tests pass.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 28 Jun 2026 23:55:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha32-1) stable; urgency=medium
 
   * Add a configurable `debug` storage property (0=off..3=trace) with a logging

@@ -21,6 +21,8 @@
 #   remote-add    Register a remote storage system
 #   orphans       Report LDEV/registry inconsistencies for a storage
 #   diagnostics   Read-only support bundle (config/REST health/drift/devices)
+#   lun-paths     Report per-node LU-path/host-group counts + headroom (read-only)
+#   reconcile-maps Unmap orphan LU paths on this node (dry-run unless --apply)
 
 use strict;
 use warnings;
@@ -33,6 +35,14 @@ use lib '/usr/share/perl5';
 
 use PVE::Storage::HitachiBlock::RestClient;
 use PVE::Storage::HitachiBlock::Config;
+use PVE::Storage::HitachiBlock::Multipath;
+use PVE::Storage::HitachiBlock::LunPaths;
+
+# Per-FE-port LU-path budget (model-dependent on VSP; the issue cites 2048/4096).
+# Used for headroom reporting and the soft over-budget warning; override with
+# --lun-path-budget. The per-port host-group cap is a fixed 255.
+my $DEFAULT_LUN_PATH_BUDGET = 2048;
+my $HOST_GROUPS_PER_PORT_CAP = 255;
 
 my $command = shift @ARGV || '';
 
@@ -55,6 +65,8 @@ GetOptions(\%opts,
     'storage-id=s',
     'mgmt-port=i',
     'auto-cleanup',
+    'lun-path-budget=i',
+    'apply',
     'json',
     'help',
 ) or pod2usage(2);
@@ -118,6 +130,10 @@ eval {
         cmd_remote_add();
     } elsif ($command eq 'orphans') {
         cmd_orphans();
+    } elsif ($command eq 'lun-paths') {
+        cmd_lun_paths();
+    } elsif ($command eq 'reconcile-maps') {
+        cmd_reconcile_maps();
     } else {
         die "Unknown command: '$command'\nRun with --help for usage.\n";
     }
@@ -435,6 +451,9 @@ sub cmd_diagnostics {
     }
     $r{devices} = \@devs;
 
+    # LU-path / host-group counts for this node (guarded: needs REST).
+    $r{lun_paths} = eval { build_lun_path_report() };
+
     # Snapshot the accumulated REST timing AFTER all probes above.
     if (my $ts = $client->rest_timing_stats()) {
         $r{rest}{timing} = {
@@ -495,7 +514,131 @@ sub cmd_diagnostics {
             $d->{volname}, $d->{ldev_id}, ($d->{path} // '-'),
             ($d->{present} ? 'yes' : 'no'), ($d->{is_block} ? 'yes' : 'no');
     }
+
+    print "\n-- LU-path / host-group counts (this node) --\n";
+    if (my $lp = $r{lun_paths}) {
+        for my $port (sort keys %{ $lp->{ports} }) {
+            my $p = $lp->{ports}{$port};
+            printf "  %-8s HG %-4s  LU-paths: %d   host-groups-on-port: %s / %d\n",
+                $port, (defined $p->{host_group_number} ? $p->{host_group_number} : '-'),
+                $p->{lun_path_count},
+                (defined $p->{host_groups_on_port} ? $p->{host_groups_on_port} : '?'),
+                $HOST_GROUPS_PER_PORT_CAP;
+        }
+        printf "  total mapped LU paths: %d ; orphan LU paths: %d\n",
+            $lp->{total_lun_paths}, scalar @{ $lp->{orphans} };
+        printf "  WARNING: %d orphan LU path(s) mapped here with no registry LDEV"
+            . " (run 'reconcile-maps')\n", scalar @{ $lp->{orphans} }
+            if @{ $lp->{orphans} };
+        printf "  WARNING: port %s at %d%% of LU-path budget (%d/%d)\n",
+            $_->{port}, $_->{pct}, $_->{count}, $_->{budget} for @{ $lp->{over_budget} };
+    } else {
+        print "  (unavailable)\n";
+    }
+
     print "\n=== end diagnostics ===\n";
+}
+
+# Build a LunPaths scan report for THIS node against $storeid. Read-only.
+sub build_lun_path_report {
+    my $multipath = PVE::Storage::HitachiBlock::Multipath->new();
+    my $wwns = $multipath->get_local_wwns();
+
+    my $registry = $config->list_registered();
+    my %registered;
+    for my $e (values %$registry) {
+        next unless ref $e eq 'HASH' && defined $e->{ldev_id};
+        $registered{ $e->{ldev_id} } = 1;
+    }
+
+    my @ports = grep { length } map { s/^\s+|\s+$//gr } split(/,/, $scfg->{target_ports} || '');
+    my $budget = $opts{'lun-path-budget'} || $DEFAULT_LUN_PATH_BUDGET;
+
+    return PVE::Storage::HitachiBlock::LunPaths->scan(
+        client           => $client,
+        wwns             => $wwns,
+        target_ports     => \@ports,
+        registered_ldevs => \%registered,
+        per_port_budget  => $budget,
+    );
+}
+
+# Parse the storage's ldev_range into [min,max], or undef if unset/invalid.
+sub lun_path_ldev_range {
+    my $r = $scfg->{ldev_range} or return undef;
+    my ($min, $max) = $r =~ /^\s*(\d+)\s*-\s*(\d+)\s*$/ or return undef;
+    return [ $min, $max ];
+}
+
+sub cmd_lun_paths {
+    my $rep = build_lun_path_report();
+    my $budget = $opts{'lun-path-budget'} || $DEFAULT_LUN_PATH_BUDGET;
+
+    if ($opts{json}) {
+        require JSON;
+        print JSON->new->canonical->encode($rep) . "\n";
+        return;
+    }
+
+    chomp(my $hostname = `hostname -s 2>/dev/null` || '');
+    print "=== LU-path / host-group accounting (this node) ===\n";
+    printf "node: %s   storeid: %s\n", $hostname, $opts{storeid};
+    printf "per-port LU-path budget: %d (warn at %d%%)   host-groups/port cap: %d\n\n",
+        $budget, int($PVE::Storage::HitachiBlock::LunPaths::BUDGET_THRESHOLD * 100),
+        $HOST_GROUPS_PER_PORT_CAP;
+
+    for my $port (sort keys %{ $rep->{ports} }) {
+        my $p = $rep->{ports}{$port};
+        my $hgop = defined $p->{host_groups_on_port} ? $p->{host_groups_on_port} : '?';
+        printf "  %-8s HG %-4s  LU-paths: %d / %d   host-groups-on-port: %s / %d\n",
+            $port, (defined $p->{host_group_number} ? $p->{host_group_number} : '-'),
+            $p->{lun_path_count}, $budget, $hgop, $HOST_GROUPS_PER_PORT_CAP;
+    }
+    printf "\ntotal mapped LU paths (this node): %d\n", $rep->{total_lun_paths};
+
+    my @orphans = @{ $rep->{orphans} };
+    printf "orphan LU paths (mapped here, LDEV not in registry): %d\n", scalar @orphans;
+    printf "  LDEV %-6s lun %-14s port %s\n", $_->{ldev_id}, $_->{lun_id}, $_->{port}
+        for @orphans;
+    print "  (run 'reconcile-maps' to clean them up)\n" if @orphans;
+
+    for my $ob (@{ $rep->{over_budget} }) {
+        printf "WARNING: port %s at %d%% of LU-path budget (%d / %d)\n",
+            $ob->{port}, $ob->{pct}, $ob->{count}, $ob->{budget};
+    }
+}
+
+sub cmd_reconcile_maps {
+    my $rep   = build_lun_path_report();
+    my $range = lun_path_ldev_range();
+    my $apply = $opts{apply} ? 1 : 0;
+
+    my $res = PVE::Storage::HitachiBlock::LunPaths->reconcile(
+        $client, $rep, ldev_range => $range, apply => $apply,
+    );
+
+    if ($opts{json}) {
+        require JSON;
+        print JSON->new->canonical->encode($res) . "\n";
+        return;
+    }
+
+    if ($apply) {
+        printf "Reconcile applied. Unmapped %d orphan LU path(s):\n", scalar @{ $res->{unmapped} };
+        printf "  LDEV %-6s lun %-14s port %s\n", $_->{ldev_id}, $_->{lun_id}, $_->{port}
+            for @{ $res->{unmapped} };
+    } else {
+        printf "DRY-RUN (use --apply to unmap). Would unmap %d orphan LU path(s):\n",
+            scalar @{ $res->{would_unmap} };
+        printf "  LDEV %-6s lun %-14s port %s\n", $_->{ldev_id}, $_->{lun_id}, $_->{port}
+            for @{ $res->{would_unmap} };
+        print "  none\n" unless @{ $res->{would_unmap} };
+    }
+    if (@{ $res->{skipped} }) {
+        printf "Skipped %d:\n", scalar @{ $res->{skipped} };
+        printf "  LDEV %-6s lun %-14s (%s)\n", $_->{ldev_id}, $_->{lun_id}, $_->{reason}
+            for @{ $res->{skipped} };
+    }
 }
 
 # ── Helpers ──
@@ -583,7 +726,13 @@ hitachiblock-repl - Hitachi Block Storage Replication CLI
     orphans           Report LDEV/registry inconsistencies
     diagnostics       Read-only support bundle for bug reports (no mutations;
                       config with secrets redacted, REST health + response
-                      times, registry/array drift, host device state)
+                      times, registry/array drift, host device state,
+                      LU-path/host-group counts)
+    lun-paths         Per-node LU-path + host-group counts with headroom vs the
+                      array caps, plus any orphan LU paths (read-only)
+    reconcile-maps    Unmap orphan LU paths (LDEV no longer in the registry) in
+                      this node's host groups; DRY-RUN unless --apply,
+                      ldev_range-fenced
 
   Options:
     --storeid         PVE storage ID (for credentials and config lookup)
@@ -600,6 +749,8 @@ hitachiblock-repl - Hitachi Block Storage Replication CLI
     --quorum-disk-id  Quorum disk ID (for GAD)
     --consistency-group  Enable consistency group
     --auto-cleanup    (orphans) prune registry entries with no backing LDEV
+    --apply           (reconcile-maps) actually unmap (default is dry-run)
+    --lun-path-budget (lun-paths) per-port LU-path budget for headroom (default 2048)
     --mgmt-ip         Override Configuration Manager IP
     --storage-id      Override storage serial number
     --mgmt-port       Override API port
