@@ -128,16 +128,43 @@ subtest 'rename_snapshot' => sub {
 
 # ── _resolve_snapshot_id: registry hit, then array fallback ──
 subtest '_resolve_snapshot_id' => sub {
-    my $client = FakeClient->new(
-        { snapshotId => '256,9', snapshotGroupName => "pve_${store}_256_legacyonly" },
-    );
-    is($CLASS->_resolve_snapshot_id($client, $cfg, $store, 256, $vol, 'snap1'), '256,3',
+    is($CLASS->_resolve_snapshot_id(FakeClient->new(), $cfg, $store, 256, $vol, 'snap1'), '256,3',
         'resolves from the registry when present');
-    # Not in registry -> fall back to a group-name match on the array.
-    is($CLASS->_resolve_snapshot_id($client, $cfg, $store, 256, $vol, 'legacyonly'), '256,9',
-        'falls back to array group-name search');
-    is($CLASS->_resolve_snapshot_id($client, $cfg, $store, 256, $vol, 'nope'), undef,
+
+    # Not in registry -> array group-name search. The legacy 2-part name
+    # (pve_<store>_<snap>, NO ldev segment) still resolves after upgrade.
+    my $client_legacy = FakeClient->new(
+        { snapshotId => '256,9', snapshotGroupName => "pve_${store}_legacysnap" },
+    );
+    is($CLASS->_resolve_snapshot_id($client_legacy, $cfg, $store, 256, $vol, 'legacysnap'), '256,9',
+        'falls back via the legacy 2-part group name');
+
+    # The volume-specific 3-part name (pve_<store>_<ldev>_<snap>) resolves too.
+    my $client_vs = FakeClient->new(
+        { snapshotId => '256,11', snapshotGroupName => "pve_${store}_256_volspec" },
+    );
+    is($CLASS->_resolve_snapshot_id($client_vs, $cfg, $store, 256, $vol, 'volspec'), '256,11',
+        'falls back via the volume-specific 3-part group name');
+
+    is($CLASS->_resolve_snapshot_id(FakeClient->new(), $cfg, $store, 256, $vol, 'nope'), undef,
         'returns undef when unresolvable');
+};
+
+# ── _find_pair_by_group: exact group-name match returning the raw pair ──
+subtest '_find_pair_by_group' => sub {
+    my $client = FakeClient->new(
+        { snapshotId => '256,7', svolLdevId => 333, snapshotGroupName => 'pve_lc_400' },
+        { snapshotId => '256,8', svolLdevId => 334, snapshotGroupName => "pve_${store}_256_snapX" },
+    );
+    my $p = $CLASS->_find_pair_by_group($client, 256, "pve_${store}_256_snapX");
+    is($p->{snapshotId}, '256,8', 'returns the pair whose group name matches exactly');
+    is($p->{svolLdevId}, 334, 'returned hashref carries svolLdevId for the caller to read');
+
+    my $lc = $CLASS->_find_pair_by_group($client, 256, 'pve_lc_400');
+    is($lc->{snapshotId}, '256,7', 'matches a linked-clone (pve_lc_) group name');
+
+    is($CLASS->_find_pair_by_group($client, 256, 'pve_nomatch'), undef,
+        'returns undef when no group name matches');
 };
 
 # ── _reconcile_snapshots: prune registry entries the array no longer has ──

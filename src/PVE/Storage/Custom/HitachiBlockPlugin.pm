@@ -1155,13 +1155,10 @@ sub volume_snapshot {
     my $snapshot_id;
 
     eval {
-        my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id);
-        for my $s (@$snaps) {
-            if (($s->{snapshotGroupName} || '') eq $snap_group) {
-                $svol_ldev_id = $s->{svolLdevId};
-                $snapshot_id  = $s->{snapshotId};
-                last;
-            }
+        my $pair = $class->_find_pair_by_group($client, $ldev_id, $snap_group);
+        if ($pair) {
+            $svol_ldev_id = $pair->{svolLdevId};
+            $snapshot_id  = $pair->{snapshotId};
         }
     };
 
@@ -1215,24 +1212,52 @@ sub volume_snapshot_delete {
         }
     }
 
-    # Fallback: search by snapshot group name on the array. Accept both the
-    # volume-specific name and the legacy name (for pairs created by older
-    # versions) so existing snapshots remain manageable after upgrade.
-    my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id);
+    # Fallback: find the pair id by group name (volume-specific or legacy) and
+    # delete it. This is deliberately a FRESH array search — not the registry id
+    # we just tried above (which failed) — so a drifted registry id still recovers.
+    my $snapshot_id = $class->_find_snapshot_id_by_group($client, $storeid, $ldev_id, $snap);
+    if (defined $snapshot_id) {
+        $client->delete_snapshot($snapshot_id);
+        $config->unregister_snapshot($volname, $snap);
+        return 1;
+    }
+
+    die "Snapshot '$snap' not found for volume '$volname'\n";
+}
+
+# Single owner of the snapshot-group naming convention: search the array for the
+# pair id (snapshotId = "<pvolLdevId>,<muNumber>") of $snap on P-VOL $ldev_id by
+# group name, accepting BOTH the volume-specific name and the legacy name (so
+# pairs created by older versions remain manageable after upgrade). Returns the
+# snapshotId or undef. This is the array-search half shared by _resolve_snapshot_id
+# and volume_snapshot_delete's fallback, so the naming rule lives in one place.
+sub _find_snapshot_id_by_group {
+    my ($class, $client, $storeid, $ldev_id, $snap) = @_;
+
+    my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id) || [];
     my %target_groups = (
         "pve_${storeid}_${ldev_id}_${snap}" => 1,
         "pve_${storeid}_${snap}"            => 1,
     );
-
     for my $s (@$snaps) {
-        if ($target_groups{ $s->{snapshotGroupName} || '' }) {
-            $client->delete_snapshot($s->{snapshotId});
-            $config->unregister_snapshot($volname, $snap);
-            return 1;
-        }
+        return $s->{snapshotId} if $target_groups{ $s->{snapshotGroupName} || '' };
     }
+    return undef;
+}
 
-    die "Snapshot '$snap' not found for volume '$volname'\n";
+# Find the array snapshot pair on P-VOL $ldev_id whose group name is EXACTLY
+# $group (e.g. the pair just created under that group), returning the raw pair
+# hashref or undef. Shared by the just-created-pair lookups that then read
+# svolLdevId / snapshotId off the result. (For the legacy/volume-specific delete
+# lookup that maps two names to an id, use _find_snapshot_id_by_group instead.)
+sub _find_pair_by_group {
+    my ($class, $client, $ldev_id, $group) = @_;
+
+    my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id) || [];
+    for my $s (@$snaps) {
+        return $s if ($s->{snapshotGroupName} || '') eq $group;
+    }
+    return undef;
 }
 
 # Resolve a snapshot's array pair id (snapshotId = "<pvolLdevId>,<muNumber>") from
@@ -1245,15 +1270,7 @@ sub _resolve_snapshot_id {
     return $snap_meta->{snapshot_id}
         if $snap_meta && defined $snap_meta->{snapshot_id};
 
-    my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id) || [];
-    my %target_groups = (
-        "pve_${storeid}_${ldev_id}_${snap}" => 1,
-        "pve_${storeid}_${snap}"            => 1,
-    );
-    for my $s (@$snaps) {
-        return $s->{snapshotId} if $target_groups{ $s->{snapshotGroupName} || '' };
-    }
-    return undef;
+    return $class->_find_snapshot_id_by_group($client, $storeid, $ldev_id, $snap);
 }
 
 # Poll a Thin Image pair's status until it reaches $want (returns the status), or
@@ -1546,12 +1563,8 @@ sub clone_image {
         $pair_created = 1;
 
         # Resolve the pair's object id (pvolLdevId,muNumber) for assign + teardown.
-        my $snaps = $client->list_snapshots(pvol_ldev_id => $clone_source_ldev);
-        for my $s (@$snaps) {
-            next unless ($s->{snapshotGroupName} || '') eq $snap_group;
-            $pair_snapshot_id = $s->{snapshotId};
-            last;
-        }
+        my $pair = $class->_find_pair_by_group($client, $clone_source_ldev, $snap_group);
+        $pair_snapshot_id = $pair->{snapshotId} if $pair;
         die "Could not resolve the Thin Image pair for the linked clone\n"
             unless defined $pair_snapshot_id;
 
@@ -1589,12 +1602,8 @@ sub clone_image {
         if ($pair_created) {
             if (!defined $pair_snapshot_id) {
                 eval {
-                    my $snaps = $client->list_snapshots(pvol_ldev_id => $clone_source_ldev);
-                    for my $s (@$snaps) {
-                        next unless ($s->{snapshotGroupName} || '') eq "pve_lc_${new_ldev_id}";
-                        $pair_snapshot_id = $s->{snapshotId};
-                        last;
-                    }
+                    my $pair = $class->_find_pair_by_group($client, $clone_source_ldev, "pve_lc_${new_ldev_id}");
+                    $pair_snapshot_id = $pair->{snapshotId} if $pair;
                 };
             }
             eval { $client->delete_snapshot($pair_snapshot_id) } if defined $pair_snapshot_id;
@@ -2523,23 +2532,20 @@ sub volume_snapshot_consistency_group {
         my ($ldev_id) = $config->lookup_ldev($volname);
 
         eval {
-            my $snaps = $client->list_snapshots(pvol_ldev_id => $ldev_id);
-            for my $s (@$snaps) {
-                if (($s->{snapshotGroupName} || '') eq $snap_group) {
-                    my %snap_meta = (
-                        snapshot_group    => $snap_group,
-                        pvol_ldev_id      => $ldev_id,
-                        consistency_group => 1,
-                    );
-                    if (defined $s->{svolLdevId}) {
-                        $snap_meta{svol_ldev_id} = $s->{svolLdevId};
-                        $snap_meta{svol_wwid} = $multipath->ldev_to_wwid(
-                            $scfg->{storage_id}, $s->{svolLdevId});
-                    }
-                    $snap_meta{snapshot_id} = $s->{snapshotId} if defined $s->{snapshotId};
-                    $config->register_snapshot($volname, $snap, %snap_meta);
-                    last;
+            my $pair = $class->_find_pair_by_group($client, $ldev_id, $snap_group);
+            if ($pair) {
+                my %snap_meta = (
+                    snapshot_group    => $snap_group,
+                    pvol_ldev_id      => $ldev_id,
+                    consistency_group => 1,
+                );
+                if (defined $pair->{svolLdevId}) {
+                    $snap_meta{svol_ldev_id} = $pair->{svolLdevId};
+                    $snap_meta{svol_wwid} = $multipath->ldev_to_wwid(
+                        $scfg->{storage_id}, $pair->{svolLdevId});
                 }
+                $snap_meta{snapshot_id} = $pair->{snapshotId} if defined $pair->{snapshotId};
+                $config->register_snapshot($volname, $snap, %snap_meta);
             }
         };
         warn "Consistency group snapshot metadata warning for '$volname': $@" if $@;
