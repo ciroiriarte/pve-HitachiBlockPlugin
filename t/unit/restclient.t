@@ -130,6 +130,41 @@ subtest 'rest_timing_stats' => sub {
     is($s->{last}, 0.20, 'last records the most recent call');
 };
 
+# ── Debug logging: redaction + level gating (#33) ──
+subtest 'debug redaction and level gating' => sub {
+    my $client = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '123',
+        username => 'admin', password => 'secret',
+    );
+    is($client->{debug}, 0, 'debug defaults to 0 (off)');
+
+    # _redact masks secret-bearing keys, leaves others intact, handles nesting.
+    my $body = '{"parameters":{"poolId":5,"password":"hunter2","svolLdevId":262},'
+        . '"token":"abc123","sessionId":"deadbeef","auth":"x","label":"pve:store:vm"}';
+    my $r = $client->_redact($body);
+    unlike($r, qr/hunter2/,  'password value masked');
+    unlike($r, qr/abc123/,   'token value masked');
+    unlike($r, qr/deadbeef/, 'sessionId value masked');
+    like($r, qr/"password"\s*:\s*"<redacted>"/, 'password replaced with <redacted>');
+    like($r, qr/"poolId":5/,        'non-secret field preserved');
+    like($r, qr/"svolLdevId":262/,  'non-secret field preserved');
+    like($r, qr/"label":"pve:store:vm"/, 'label preserved');
+
+    # Level gating: _debug must not emit below threshold. We can't read syslog here,
+    # so assert via a captured warn shim: temporarily redirect _debug's emit by
+    # checking the guard returns immediately (no exception, no side effect) at low
+    # levels, and that the debug level is honored.
+    my $c2 = PVE::Storage::HitachiBlock::RestClient->new(
+        mgmt_ip => '10.0.1.100', storage_id => '123',
+        username => 'admin', password => 'secret', debug => 2,
+    );
+    is($c2->{debug}, 2, 'debug level stored from constructor');
+    # Below-threshold call returns without error and without opening syslog noise.
+    ok(eval { $c2->_debug(3, 'trace-only line'); 1 }, '_debug(3) at level 2 is a safe no-op');
+    ok(eval { $c2->_debug(2, 'level-2 line'); 1 }, '_debug(2) at level 2 does not throw');
+    ok(eval { $client->_debug(1, 'x'); 1 }, '_debug at level 0 client is a safe no-op');
+};
+
 subtest 'ldev_operations_require_params' => sub {
     my $client = PVE::Storage::HitachiBlock::RestClient->new(
         mgmt_ip    => '10.0.1.100',

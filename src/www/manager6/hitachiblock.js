@@ -260,6 +260,18 @@ Ext.define('PVE.storage.HitachiBlockInputPanel', {
                 deleteEmpty: !me.isCreate,
             },
             {
+                xtype: 'proxmoxintegerfield',
+                name: 'debug',
+                fieldLabel: gettext('Debug log level'),
+                // 0=off, 1=basic ops, 2=+REST timing, 3=trace (bodies, redacted).
+                // Written to syslog/journal (tag HitachiBlock); never logs secrets.
+                minValue: 0,
+                maxValue: 3,
+                emptyText: '0',
+                allowBlank: true,
+                deleteEmpty: !me.isCreate,
+            },
+            {
                 xtype: 'proxmoxcheckbox',
                 name: 'tls_verify',
                 fieldLabel: gettext('Verify TLS certificate'),

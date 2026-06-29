@@ -89,6 +89,9 @@ sub new {
         # immediately releases a transient session per basic-auth request, so
         # nothing accumulates. login()/logout()/keepalive() become no-ops.
         sessionless => $opts{sessionless} ? 1 : 0,
+        # Diagnostic logging verbosity (#33): 0=off, 2=+per-request method/path/
+        # status/timing, 3=+bodies (redacted). Never logs auth headers/tokens.
+        debug       => $opts{debug} // 0,
     }, $class;
 
     $self->{base_url} = $self->_build_base_url();
@@ -918,6 +921,37 @@ sub rest_timing_stats {
     return { %$s, avg => $s->{total} / $s->{count} };
 }
 
+# Diagnostic logging (#33). Emits to syslog (tag 'HitachiBlock') only when the
+# client's debug level is >= $level. No-op at 0; never throws. The Authorization
+# header and basic-auth credentials are never passed here; body logging is
+# redacted by the caller via _redact().
+my $_rc_syslog_open = 0;
+sub _debug {
+    my ($self, $level, $msg) = @_;
+
+    return unless ($self->{debug} // 0) >= $level;
+    eval {
+        require Sys::Syslog;
+        unless ($_rc_syslog_open) {
+            Sys::Syslog::openlog('HitachiBlock', 'ndelay,pid', 'daemon');
+            $_rc_syslog_open = 1;
+        }
+        Sys::Syslog::syslog('info', '%s', "[$self->{storage_id}] L$level REST $msg");
+    };
+    return;
+}
+
+# Mask the values of secret-bearing JSON keys before logging a request/response
+# body at trace level. Defensive only — the plugin never puts secrets in bodies
+# (auth is via the HTTP header) — but a future field must never leak. Operates on
+# the raw JSON string so it works regardless of nesting.
+sub _redact {
+    my ($self, $body) = @_;
+    return '' unless defined $body;
+    $body =~ s/("(?:password|passwd|token|sessionId|auth\w*|credential\w*|secret)"\s*:\s*)"[^"]*"/$1"<redacted>"/gi;
+    return $body;
+}
+
 sub _request {
     my ($self, $method, $url, $body, $skip_reauth) = @_;
 
@@ -934,7 +968,11 @@ sub _request {
     }
 
     if ($body) {
-        $req->content(encode_json($body));
+        my $json = encode_json($body);
+        $req->content($json);
+        # bare API path for readable logs (drop the long base URL).
+        (my $logpath = $url) =~ s{^.*/v1/objects/}{/};
+        $self->_debug(3, "$method $logpath body=" . $self->_redact($json));
     }
 
     my $res;
@@ -944,7 +982,16 @@ sub _request {
     while ($retries <= $MAX_RETRIES) {
         my $t0 = Time::HiRes::time();
         $res = $self->{ua}->request($req);
-        $self->_record_rest_timing($method, $url, Time::HiRes::time() - $t0);
+        my $elapsed = Time::HiRes::time() - $t0;
+        $self->_record_rest_timing($method, $url, $elapsed);
+
+        if (($self->{debug} // 0) >= 2) {
+            (my $logpath = $url) =~ s{^.*/v1/objects/}{/};
+            $self->_debug(2, sprintf('%s %s -> %s (%d ms)',
+                $method, $logpath, $res->code, int($elapsed * 1000)));
+            $self->_debug(3, 'response body=' . $self->_redact($res->content // ''))
+                if length($res->content // '');
+        }
 
         if ($res->is_success) {
             my $content = $res->content;

@@ -299,6 +299,19 @@ sub properties {
             default     => 120,
             optional    => 1,
         },
+        debug => {
+            description => "Diagnostic logging verbosity, written to the system log"
+                . " (syslog/journal, tag 'HitachiBlock'): 0 = off (default), 1 = basic"
+                . " (high-level operations: alloc/free/clone/snapshot/rollback), 2 = +"
+                . " per-request REST method, path, HTTP status and elapsed time, 3 = trace"
+                . " (+ request/response bodies). Credentials and session tokens are NEVER"
+                . " logged at any level. View with: journalctl -t HitachiBlock.",
+            type        => 'integer',
+            minimum     => 0,
+            maximum     => 3,
+            default     => 0,
+            optional    => 1,
+        },
     };
 }
 
@@ -334,6 +347,7 @@ sub options {
         tls_ca_file       => { optional => 1 },
         rest_keepalive    => { optional => 1 },
         lock_timeout      => { optional => 1 },
+        debug             => { optional => 1 },
     };
 }
 
@@ -615,6 +629,9 @@ sub _assert_snap_pool_supports_ti {
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
+    $class->_debug($scfg, 1, "alloc_image vmid=$vmid name="
+        . (defined $name ? $name : '(auto)') . " size_kb=" . (defined $size ? $size : '?'));
+
     die "unsupported format '$fmt'\n" if $fmt && $fmt ne 'raw';
 
     my $client = $class->_client($storeid, $scfg);
@@ -691,6 +708,7 @@ sub alloc_image {
         die "Failed to allocate volume '$name': $err";
     }
 
+    $class->_debug($scfg, 1, "alloc_image OK volname=$name");
     return $name;
 }
 
@@ -702,6 +720,8 @@ sub free_image {
 
     my ($ldev_id, $meta) = $config->lookup_ldev($volname);
     die "Volume '$volname' not found in registry\n" unless defined $ldev_id;
+
+    $class->_debug($scfg, 1, "free_image volname=$volname ldev=$ldev_id");
 
     # Refuse to delete a volume the user marked protected (#15). Checked before we
     # open an array session so it fails fast; cleared via `pvesm set` / the GUI
@@ -801,6 +821,7 @@ sub free_image {
     # Unregister (snapshots are nested inside the registry entry, cleaned up automatically)
     $config->unregister_ldev($volname);
 
+    $class->_debug($scfg, 1, "free_image OK volname=$volname ldev=$ldev_id");
     return undef;
 }
 
@@ -1101,6 +1122,8 @@ sub volume_snapshot {
     my ($ldev_id) = $config->lookup_ldev($volname);
     die "Volume '$volname' not found\n" unless defined $ldev_id;
 
+    $class->_debug($scfg, 1, "volume_snapshot volname=$volname ldev=$ldev_id snap=$snap");
+
     # Fail fast (with an actionable message) if the snap pool can't back Thin Image
     # data, instead of letting create_snapshot surface the array's cryptic error (#21).
     $class->_assert_snap_pool_supports_ti($storeid, $scfg, $client);
@@ -1148,6 +1171,8 @@ sub volume_snapshot {
 
     $config->register_snapshot($volname, $snap, %snap_meta);
 
+    $class->_debug($scfg, 1, "volume_snapshot OK volname=$volname snap=$snap"
+        . (defined $svol_ldev_id ? " svol=$svol_ldev_id" : ''));
     return undef;
 }
 
@@ -1305,6 +1330,9 @@ sub volume_snapshot_rollback {
         $class->_resolve_snapshot_id($client, $config, $storeid, $ldev_id, $volname, $snap);
     die "Snapshot '$snap' not found for volume '$volname'\n" unless defined $snapshot_id;
 
+    $class->_debug($scfg, 1, "volume_snapshot_rollback volname=$volname snap=$snap"
+        . " ldev=$ldev_id pair=$snapshot_id");
+
     # Restore = reverse-copy S-VOL -> P-VOL. The array runs RCPY and settles to PAIR
     # (snapshot data merged into the P-VOL). restore_snapshot() returns when the JOB
     # is accepted, BEFORE the RCPY copy finishes on a large volume, so WAIT for the
@@ -1333,6 +1361,7 @@ sub volume_snapshot_rollback {
     eval { $class->_reconcile_snapshots($client, $config, $ldev_id, $volname); };
     warn "Snapshot reconcile warning: $@" if $@;
 
+    $class->_debug($scfg, 1, "volume_snapshot_rollback OK volname=$volname snap=$snap");
     return 1;
 }
 
@@ -1444,6 +1473,9 @@ sub clone_image {
     # create_base, rename_volume, volume_snapshot_delete) compare against.
     my ($src_ldev_id, $src_meta) = $config->lookup_ldev($volname);
     die "Source volume '$volname' not found\n" unless defined $src_ldev_id;
+
+    $class->_debug($scfg, 1, "clone_image src=$volname"
+        . (defined $snap ? " snap=$snap" : '') . " -> vmid=$vmid");
 
     # The P-VOL of the CoW pair: the snapshot's S-VOL when cloning from a snapshot,
     # otherwise the (base) volume's own LDEV.
@@ -1567,6 +1599,7 @@ sub clone_image {
         die "Failed to clone '$volname' to '$new_name': $err";
     }
 
+    $class->_debug($scfg, 1, "clone_image OK $volname -> $new_name (ldev=$new_ldev_id)");
     return $new_name;
 }
 
@@ -1763,6 +1796,28 @@ sub _client {
     return $client;
 }
 
+# Diagnostic logging (#33). Emits to syslog (tag 'HitachiBlock', view with
+# `journalctl -t HitachiBlock`) only when the storage's `debug` level is >= $level.
+# A no-op when debug is unset/0. Never throws (syslog failures are swallowed) and
+# never logs credentials — callers pass only operation context, never secrets.
+my $_hb_syslog_open = 0;
+sub _debug {
+    my ($class, $scfg, $level, $msg) = @_;
+
+    return unless $scfg && ($scfg->{debug} // 0) >= $level;
+    eval {
+        require Sys::Syslog;
+        unless ($_hb_syslog_open) {
+            Sys::Syslog::openlog('HitachiBlock', 'ndelay,pid', 'daemon');
+            $_hb_syslog_open = 1;
+        }
+        my $sid = $scfg->{storage_id} // '?';
+        # %s format guards against '%' in $msg being treated as a format directive.
+        Sys::Syslog::syslog('info', '%s', "[$sid] L$level $msg");
+    };
+    return;
+}
+
 sub _get_client {
     my ($class, $storeid, $scfg, %opts) = @_;
 
@@ -1794,6 +1849,7 @@ sub _get_client {
         tls_verify  => $scfg->{tls_verify},
         tls_ca_file => $scfg->{tls_ca_file},
         sessionless => $sessionless,
+        debug       => $scfg->{debug},
     );
 }
 

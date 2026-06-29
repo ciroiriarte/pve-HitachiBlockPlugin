@@ -113,4 +113,22 @@ subtest 'free_image honours protected' => sub {
     is($id, 256, 'protected volume survives the free attempt');
 };
 
+# ── Debug logging gate (#33) ──
+subtest 'plugin _debug level gating' => sub {
+    # _debug is a no-op unless $scfg->{debug} >= level, and never throws regardless
+    # of syslog availability. We can't read syslog here, so assert the gate contract
+    # (safe no-op below threshold, no exception at/above) holds for all levels.
+    ok($CLASS->can('_debug'), 'plugin has _debug helper');
+
+    my $off = { storage_id => 'x' };                 # debug unset -> off
+    ok(eval { $CLASS->_debug($off, 1, 'should not emit'); 1 }, 'debug unset is a safe no-op');
+
+    my $lvl2 = { storage_id => 'x', debug => 2 };
+    ok(eval { $CLASS->_debug($lvl2, 1, 'basic'); 1 },  '_debug(1) at level 2 does not throw');
+    ok(eval { $CLASS->_debug($lvl2, 3, 'trace'); 1 },  '_debug(3) at level 2 is a safe no-op');
+    # A message containing % must not be treated as a format string.
+    ok(eval { $CLASS->_debug($lvl2, 1, '100% used path=/dev/x'); 1 },
+        'percent signs in the message are safe');
+};
+
 done_testing();

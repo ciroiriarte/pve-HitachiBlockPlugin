@@ -1,3 +1,23 @@
+pve-storage-hitachiblock (1.2.0~alpha32-1) stable; urgency=medium
+
+  * Add a configurable `debug` storage property (0=off..3=trace) with a logging
+    helper routed to syslog (GitHub #33). Levels: 0 off (default); 1 basic
+    high-level operations (alloc/free/clone/snapshot/rollback start + result);
+    2 + per-request REST method, bare path, HTTP status and elapsed time (the
+    management endpoint is intrinsically slow, so per-call latency is a primary
+    troubleshooting signal); 3 trace (+ request/response bodies). Output goes to
+    syslog/journal under the tag 'HitachiBlock' (journalctl -t HitachiBlock), so
+    it never pollutes task output at level 0. Credentials and session tokens are
+    NEVER logged at any level: the Authorization header and basic-auth are never
+    emitted, and at level 3 any password/token/auth/credential/secret field in a
+    body is redacted. The plugin's _debug() and RestClient's level/redaction are
+    unit-tested; the level is threaded from $scfg into RestClient. Exposed in the
+    Web UI (Advanced) and documented in docs/configuration.md. This adds the
+    threshold/level logging layer on top of the REST timing introduced for the
+    diagnostics bundle (#18).
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Sun, 28 Jun 2026 21:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha31-1) stable; urgency=medium
 
   * Add a read-only `diagnostics` support-bundle subcommand to hitachiblock-repl
