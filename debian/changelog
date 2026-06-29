@@ -1,3 +1,25 @@
+pve-storage-hitachiblock (1.2.0~alpha37-1) stable; urgency=medium
+
+  * Opt-in SCSI-3 Persistent Reservation readiness for clustered/shared guest
+    disks (GitHub #2). New default-off `persistent_reservations` storage property.
+    SCSI-3 PR travels guest -> QEMU -> qemu-pr-helper -> dm-multipath (the array
+    already honours LU-wide PR), so the plugin's role is host-side validate-and-warn:
+    - When enabled, activate_volume runs a READ-ONLY readiness check on the LUN's
+      multipath device (qemu-pr-helper socket present + a multipath reservation_key
+      configured) and WARNS once, non-fatally, if it is not ready. It never edits
+      multipath.conf, never registers keys, never calls the array, and never blocks
+      activation. Off by default with zero effect on normal single-owner volumes.
+    - New `hitachiblock-repl pr-check` read-only operator diagnostic (no array
+      login) reports node PR readiness; --json supported.
+    - New docs/clustered-disks.md runbook: host prerequisites (qemu-pr-helper.socket
+      + multipath reservation_key), the storage toggle, and the guest-side per-disk
+      recipe (scsi-hd/scsi-block on virtio-scsi + a pr-manager-helper bound via
+      args:), plus verification. Multi-writer DATA safety remains the guest's
+      cluster FS/app responsibility.
+    Architect-reviewed; 187/187 unit tests.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Mon, 29 Jun 2026 18:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha36-1) stable; urgency=medium
 
   * Behaviour-preserving refactor: collapse the duplicated snapshot-pair-by-group
