@@ -1,3 +1,26 @@
+pve-storage-hitachiblock (1.2.0~alpha35-1) stable; urgency=medium
+
+  * Behaviour-preserving refactors and dead-code/test-quality cleanup (GitHub
+    #37 + #36; also folds in the prior deslop pass). No functional change.
+    - HitachiBlockPlugin.pm: extract _resolve_target (the snapname-vs-volname
+      LDEV/WWID resolution ladder shared by activate_volume / deactivate_volume /
+      filesystem_path; an $on_missing 'die'|'soft' selector preserves
+      deactivate's idempotent return-1) and _wwid_for (the stored-or-synthesised
+      WWID idiom, 5 sites). Every die message, fallback and array-call order is
+      preserved verbatim.
+    - RestClient.pm: extract _objects_url / _apply_auth / _short_path; the
+      session/job URLs, both auth sites and the three log-redaction sites now
+      funnel through one owner each. Same bytes on the wire and in logs.
+    - hitachiblock-repl: one emit_json() (canonical, sorted-key) for the --json
+      output of all subcommands, plus a %DISPATCH table replacing the hand-synced
+      command chain. Human output is byte-identical; the reconcile-maps --apply
+      ldev_range fail-closed fence (#28) is unchanged.
+    - Removed dead code (Config save_registry, Multipath $RESCAN_TIMEOUT) and
+      migrated the mirror-logic unit tests (plugin.t / multipath.t / taint.t) to
+      exercise the real modules. 184/184 unit tests pass; architect-reviewed.
+
+ -- Ciro Iriarte <ciro.iriarte+software@gmail.com>  Mon, 29 Jun 2026 13:00:00 +0000
+
 pve-storage-hitachiblock (1.2.0~alpha34-1) stable; urgency=medium
 
   * Fix the reconcile-maps ldev_range safety fence failing open on a HEX
