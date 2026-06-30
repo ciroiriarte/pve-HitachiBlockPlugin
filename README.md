@@ -7,36 +7,39 @@ thin provisioning, QoS, replication — to the array.
 
 [![OBS build (PVE 9)](https://build.opensuse.org/projects/home:ciriarte:pve-HitachiBlockPlugin/packages/pve-storage-hitachiblock/badge.svg?type=default)](https://build.opensuse.org/package/show/home:ciriarte:pve-HitachiBlockPlugin/pve-storage-hitachiblock)
 
-> ### ⚠️ Project status: pre-production, not yet hardware-validated
+> ### Project status: alpha — hardware-validated on VSP E590H, now a frozen reference driver
 >
-> This plugin was developed against the Hitachi Configuration Manager REST API
-> **specification and documentation**, and its logic is covered by an automated unit
-> test suite — but **it has not yet been validated against a live array or a real
-> Proxmox cluster.** The unit tests mock the array, the REST client, and the
-> multipath/sysfs layer, so they cannot prove that provisioning, mapping, snapshots,
-> or clones behave correctly on actual hardware.
+> This plugin has been **live-validated against a Hitachi VSP E590H on a 4-node
+> Proxmox VE 9 cluster.** Provisioning, LUN mapping, multipath/ALUA discovery,
+> Thin Image snapshots, linked and full clones, online resize, per-LDEV QoS,
+> storage migration, active-node-only (late-binding) mapping, and opt-in SCSI-3
+> Persistent Reservations were all exercised end-to-end on real hardware, and the
+> bring-up backlog is closed.
 >
-> **Do not use it against production data or a production cluster yet.** Treat it as
-> alpha. Before relying on it, work through
+> It remains **alpha**: validated on a single model (VSP E series). Other arrays
+> (VSP One Block, VSP G series) still need a pass through
 > [`docs/INTEGRATION_CHECKLIST.md`](docs/INTEGRATION_CHECKLIST.md) on your own array
-> (lab/test first) — it lists every assumption the code makes, how to verify each on
-> hardware, and what to change if it is wrong. Operations that create or delete LDEVs,
-> map LUNs, or snapshot/clone volumes can affect or destroy data if an assumption is
-> wrong on your model/microcode.
->
-> Issue reports, and especially hardware-validation results, are very welcome — see
-> [Contributing](#contributing).
+> (lab/test first) — it lists every assumption the code makes and how to verify each
+> on hardware. Operations that create or delete LDEVs, map LUNs, or snapshot/clone
+> volumes can affect or destroy data if an assumption is wrong on your model/microcode.
+> Treat production use with appropriate caution; hardware-validation results on other
+> models are very welcome — see [Contributing](#contributing).
 
-> ### 🧭 Roadmap: a multi-vendor framework
+> ### 🧭 This repository is now the frozen reference driver
 >
-> Once this plugin is **stable and hardware-validated**, its design is intended to be
-> refactored into a vendor-neutral Fibre Channel storage framework —
+> The multi-vendor framework pivot is **underway**. Now that the plugin is
+> hardware-validated, its design is being refactored into a vendor-neutral Fibre
+> Channel storage framework —
 > [**pve-FCLUPlugin**](https://github.com/ciroiriarte/pve-FCLUPlugin) — that
 > generalizes the array Driver / host Connector / shared Plugin-Registry-Capabilities
 > spine so the same per-virtual-disk LUN model can drive other arrays (e.g. Dell
-> PowerMax/PowerStore, Pure Storage, IBM FlashSystem, NetApp). This plugin serves as
-> the reference implementation; the migration is staged, so it remains the supported
-> path until the framework is ready.
+> PowerMax/PowerStore, Pure Storage, IBM FlashSystem, NetApp).
+>
+> **This plugin is the reference driver.** It stays deployable and supported for the
+> VSP E series, but the open backlog has been **migrated to the framework repo** and
+> **this repository now accepts bugfixes only** — new feature work (framework-core,
+> hitachi-driver, and upstream items) happens in
+> [pve-FCLUPlugin issues](https://github.com/ciroiriarte/pve-FCLUPlugin/issues).
 
 ## Features
 
