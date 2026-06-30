@@ -154,33 +154,80 @@ Attach the disk to a **virtio-scsi** controller:
 Hardware → Add → SCSI Hard Disk → SCSI Controller: VirtIO SCSI
 ```
 
-### Disk type: scsi-hd vs scsi-block
+### Disk type: use `scsi-block` (not `scsi-hd`)
 
-| Type | PR mechanism | Notes |
-|------|-------------|-------|
-| `scsi-hd` (emulated) | QEMU emulates SCSI; PR commands forwarded to `qemu-pr-helper` | Default for virtio-scsi in PVE; no raw SG_IO needed |
-| `scsi-block` (passthrough) | Guest sends `SG_IO` directly via the helper to the block device | Full SCSI passthrough; requires manual QEMU args |
+| Type | PR mechanism | Result, live-validated on a VSP E590H |
+|------|-------------|---------------------------------------|
+| `scsi-block` (passthrough) | Guest SG_IO; the privileged PR commands are routed via `pr-manager` → `qemu-pr-helper` to the real device | **Works.** PR register/reserve reach the array, and the guest sees the **real Hitachi WWID** (VPD page 83, `60060e80…`), so every cluster node identifies the shared disk identically. |
+| `scsi-hd` (emulated) | QEMU emulates the disk and is *meant* to forward PR to the helper | **Did not work.** The emulated disk rejected `PERSISTENT RESERVE OUT` with *Illegal Request / Invalid command operation code*. |
 
-`scsi-hd` with `pr-manager-helper` is the standard approach for most cluster stacks.
+**Use `scsi-block`.** It was the only frontend that serviced PR on this QEMU build, and
+its passthrough gives every cluster node the *same* SCSI page-83 identity (the real
+`60060e80…` NAA) — which clustered software (e.g. Windows Failover Clustering) relies on
+to recognise one shared disk across nodes. (With `scsi-hd`, QEMU synthesises the identity;
+if you must use it, pin an identical `serial=`/`wwn=` in **every** node's VM config — and
+note QEMU's `wwn=` is only a 64-bit NAA and cannot carry the 128-bit Hitachi WWID.)
 
-### Binding pr-manager-helper to a disk
+### Binding it via `args:` (validated recipe)
 
-PVE has no native `pr-manager` configuration key yet. Use the VM's `args:` line in
-`/etc/pve/qemu-server/<vmid>.conf` to inject the QEMU object and bind it to the drive:
+PVE has no native `pr-manager`/`scsi-block` key yet, so inject it through the VM's `args:`
+line in `/etc/pve/qemu-server/<vmid>.conf`. This exact form was validated live (the LUN's
+host multipath device is `/dev/mapper/3<wwid>`):
 
 ```
-args: -object pr-manager-helper,id=pr0,path=/run/qemu-pr-helper.sock
+args: -object pr-manager-helper,id=pr0,path=/run/qemu-pr-helper.sock -drive file=/dev/mapper/3<wwid>,if=none,id=prd0,format=raw,file.locking=off,file.pr-manager=pr0 -device virtio-scsi-pci,id=prscsi0 -device scsi-block,bus=prscsi0.0,drive=prd0
 ```
 
-Then add `pr-manager=pr0` to the generated drive argument for the disk in question.
-Because PVE auto-generates most `-drive` and `-device` arguments, the cleanest way to
-inject `pr-manager=pr0` per-disk without duplicating PVE's argument generation is a
-**hookscript** (PVE `pre-start` phase) that appends the `-object` line and patches the
-relevant drive argument before QEMU starts.
+Live-testing notes:
+- `pr-manager` must be on the **file child** — `file.pr-manager=pr0` — *not* the top-level
+  `-drive` (a top-level `pr-manager=` fails with *"Block format 'raw' does not support the
+  option 'pr-manager'"*).
+- The shared LUN here is **not** a PVE-managed disk of the VM, so PVE will not map it: the
+  node must already have `/dev/mapper/3<wwid>` present (mapped/activated) **before** the
+  guest starts, on **every** node the guest can run on.
+- `file.locking=off` lets the same block device back guests on different nodes.
 
-> The `args:` stanza replaces PVE's argument generation for the affected lines and is
-> fragile across VM config changes. Validate the full QEMU command line after any disk
-> add/remove/resize.
+> The `args:` stanza is fragile across VM config changes — validate the full QEMU command
+> line after any disk add/remove/resize. A `pre-start` hookscript is the more robust way to
+> assemble it.
+
+### Multipath: register with ALL_TG_PT
+
+On a **multipathed** LUN (the normal case — e.g. two FC paths), a plain PR registration
+lands on each path's I_T nexus *separately*, and the subsequent RESERVE is then rejected
+with a **reservation conflict**. Register with the **ALL_TG_PT** flag so the key applies
+across all target ports as a single registration:
+
+```
+# inside the guest:
+sg_persist --out --register --param-sark=0x<key> --param-alltgpt /dev/<disk>
+sg_persist --out --reserve  --param-rk=0x<key> --prout-type=1 /dev/<disk>
+```
+
+Multipath-aware cluster software sets ALL_TG_PT itself. Validated on the VSP E590H:
+**without** ALL_TG_PT the multipath RESERVE returns *reservation conflict*; **with** it,
+register → reserve → fence → preempt all succeed. (Single-path PR works either way.)
+
+---
+
+## Live migration of a PR-holding guest
+
+A persistent reservation is bound to the **I_T nexus** (the host's HBA WWPNs), not to the
+VM. Live migration moves the guest to a host with a **different** nexus, so the reservation
+does **not** automatically follow:
+
+- `qemu-pr-helper` **must be enabled on every node** the guest can migrate to (the units
+  ship disabled — run `systemctl enable --now qemu-pr-helper.socket` per node).
+- QEMU's `pr-manager` must re-establish the guest's registrations over the destination
+  nexus on arrival. Whether PR survives a live migration cleanly depends on the QEMU
+  version's pr-manager migration support and **must be validated in your environment** —
+  it is not guaranteed.
+- During migration the LUN is briefly mapped on both nodes (late binding), so the array
+  transiently holds the registration on both the source and destination nexus until the
+  source unmaps.
+
+If you cannot confirm clean PR-across-migration on your stack, **pin PR-using clustered
+guests to HA restart** rather than live migration.
 
 ---
 
