@@ -36,6 +36,34 @@ registers PR keys, and never blocks activation.
 
 ---
 
+## Cache mode and write safety
+
+A shared LUN is only safe if **every node reads and writes the array directly** — the host
+page cache must be **out of the path**. The QEMU disk cache mode controls this, and it is
+easy to get wrong.
+
+- **Use `cache=none`** (O_DIRECT) for any shared/clustered disk. Writes bypass the host
+  page cache and go straight to the array; reads come from the array. This is what makes
+  the disk **coherent across nodes**.
+- **Never use `cache=writeback` or `cache=writethrough`** on a shared LUN. Both stage data
+  in the **host** page cache, which is **per host** — node A's cached writes are invisible
+  to node B → stale reads, lost updates, **corruption**. This holds **even with a cluster
+  filesystem or SCSI-3 PR**: those coordinate *who may write*, but they assume the
+  underlying storage is coherent, which host write-back breaks.
+- **`cache=directsync`** (O_DIRECT + O_SYNC) is the strongest option — every write is also
+  flushed to stable storage — for cluster stacks that need synchronous write durability.
+- A PR disk attached via **`scsi-block` is always direct** (raw SG_IO bypasses the QEMU
+  block layer), so cache mode does not apply to it. The concern is for any **other** shared
+  data disk attached as a normal PVE disk (e.g. an OCFS2/GFS2 data LUN that does not use
+  PR): set `cache=none` on it explicitly.
+- Do **not** disable write barriers / FUA in the guest filesystem; the cluster FS relies on
+  ordered flushes for crash consistency.
+
+Rule of thumb: **`cache=none` (or `directsync`) on every shared disk; `writeback` on a
+shared LUN is a data-corruption bug waiting to happen.**
+
+---
+
 ## Host prerequisites (once per node)
 
 Both prerequisites are node-level — they cover all PR-enabled disks on the node.
@@ -167,6 +195,50 @@ its passthrough gives every cluster node the *same* SCSI page-83 identity (the r
 to recognise one shared disk across nodes. (With `scsi-hd`, QEMU synthesises the identity;
 if you must use it, pin an identical `serial=`/`wwn=` in **every** node's VM config — and
 note QEMU's `wwn=` is only a 64-bit NAA and cannot carry the 128-bit Hitachi WWID.)
+
+#### `scsi-block` still needs `qemu-pr-helper`
+
+Passthrough does **not** mean PR bypasses the helper. QEMU passes the ordinary commands
+(READ/WRITE/INQUIRY and PR **IN**) straight through via `SG_IO`, but it **special-cases
+`PERSISTENT RESERVE OUT`** (register/reserve/release/preempt) and routes it to the
+`pr-manager` (`qemu-pr-helper`) — never inline. Why: (1) a verbatim PR OUT to
+`/dev/mapper/3…` only hits **one** path, so the reservation registers on a single I_T
+nexus and a subsequent RESERVE conflicts; the helper registers on **all** paths via
+`libmpathpersist`. (2) privilege separation — PR OUT is privileged and is delegated to the
+dedicated root helper. With `scsi-block` and **no** `pr-manager`, PR OUT simply fails. So
+the helper is required, not redundant.
+
+#### What you trade away with `scsi-block` (and what our array offloads recover)
+
+`scsi-block` bypasses QEMU's block layer **for this disk**, so the block-layer features are
+unavailable on it. Most are recovered by the plugin's array-offloaded operations or are
+not meaningful for a shared disk; the table maps each:
+
+| Block-layer feature (per shared disk) | Recovered by our array offloads? / permanent gap |
+|---|---|
+| **IO throttling** (`mbps`/`iops`) | **Recovered — array QoS** (`qos_upper/lower_iops`, `qos_*_mbps`, `qos_priority`): enforced on the LDEV by the array, host-independent. |
+| **Snapshot** of the disk | **Recovered (offloaded) — Thin Image** (`volume_snapshot`) and **consistency-group** snapshots across the cluster's LUNs. Array-side / out-of-band; only the per-VM `qm snapshot` UX is lost (and is semantically wrong for a shared disk anyway). |
+| **Clone** | **Recovered — array linked clone (Thin Image CoW) / full clone.** |
+| **Online resize** | **Recovered — array `volume_resize`** (the guest re-reads capacity). |
+| **Cache modes** (writeback/through) | **Not a loss — always-direct SG_IO is exactly what a shared clustered disk needs** (see Cache mode below). |
+| **qcow2 / image formats** | **N/A by design** — the plugin is strictly 1-LUN-per-disk **raw**. |
+| **PVE `vzdump` backup** of the disk | **Permanent gap (within the plugin).** No offloaded VM-backup of a passthrough disk; protect the LDEV via an array snapshot + external copy (array replication would cover it but is not implemented). |
+| **PVE hot `move-disk`** (storage live-migration) of the disk | **N/A by design for a *shared* disk;** array-side pool relocation exists (`volume_migrate_pool`) for the LDEV. |
+| Real device VPD/**WWID** to the guest | **Gained**, not lost (required for clustered identity). |
+
+The one genuine permanent loss is per-VM `vzdump` of the passthrough disk. Everything else
+is either recovered by an array offload (QoS, snapshot/CG-snapshot, clone, resize) or N/A
+for a shared LUN.
+
+#### This is not exposed in the PVE web UI
+
+There is **no GUI control** for the device model (`scsi-hd` vs `scsi-block`) or for
+`pr-manager`; the web "Add SCSI Hard Disk" always creates an emulated `scsi-hd`. Set it on
+the VM (stopped; effective next start) via `qm set <vmid> --args '…'`, by editing
+`/etc/pve/qemu-server/<vmid>.conf`, or a hookscript — see below. (The `persistent_reservations`
+checkbox in the storage GUI is the storage-level **readiness toggle**, not a per-disk model
+control.) Because the shared LUN is attached as a raw passthrough through `args:`, it does
+**not** appear as a normal disk row in the GUI either.
 
 ### Binding it via `args:` (validated recipe)
 
